@@ -91,7 +91,13 @@ def parse_int_or_default(value: Any, default: int, *, minimum: int, maximum: int
 
 
 def parse_chapter_number(title: str) -> Optional[float]:
-    match = re.search(r"chapter\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+    match = re.search(
+        r"(?:chapter|chap|ch|episode|ep)\.?\s*(\d+(?:\.\d+)?)",
+        title,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"\b(\d+(?:\.\d+)?)\b", title)
     if not match:
         return None
     try:
@@ -397,7 +403,7 @@ class ToonilyAsyncDownloader:
         page: int = 1,
     ) -> dict[str, Any]:
         chapter_title = chapter.title if chapter else ""
-        chapter_number = chapter.number
+        chapter_number = chapter.number if chapter else None
         if chapter_number is None:
             chapter_number_text = str(chapter_index + 1)
         elif float(chapter_number).is_integer():
@@ -619,20 +625,51 @@ class ToonilyAsyncDownloader:
         html = await self.fetch_html(self.series_url)
         soup = BeautifulSoup(html, "html.parser")
 
-        title_node = soup.select_one("div.post-title h1") or soup.select_one("h1")
-        if title_node is None:
+        title_node = (
+            soup.select_one("div.post-title h1")
+            or soup.select_one("h1.entry-title")
+            or soup.select_one("h1")
+        )
+        manga_title = ""
+        if title_node is not None:
+            for span in title_node.select("span"):
+                span.decompose()
+            manga_title = sanitize_name(title_node.get_text(" ", strip=True))
+        if not manga_title:
+            og_title = soup.select_one("meta[property='og:title'], meta[name='og:title']")
+            if og_title is not None:
+                manga_title = sanitize_name(str(og_title.get("content") or "").strip())
+        if not manga_title:
             raise RuntimeError("Could not find manga title.")
 
-        for span in title_node.select("span"):
-            span.decompose()
-        manga_title = sanitize_name(title_node.get_text(" ", strip=True))
-
         chapters: list[Chapter] = []
-        for a in soup.select("li.wp-manga-chapter > a"):
+        chapter_selectors = (
+            "li.wp-manga-chapter > a",
+            "li.wp-manga-chapter a",
+            ".listing-chapters_wrap li a",
+            ".main.version-chap li a",
+            ".version-chap li a",
+            ".wp-manga-chapter a",
+        )
+        chapter_anchors = []
+        for selector in chapter_selectors:
+            chapter_anchors.extend(soup.select(selector))
+
+        seen_chapter_urls: set[str] = set()
+        for a in chapter_anchors:
             href = (a.get("href") or "").strip()
             if not href:
                 continue
+            href = normalize_url(href)
+            if href in seen_chapter_urls:
+                continue
             text = " ".join(a.get_text(" ", strip=True).split())
+            if not text:
+                continue
+            # Skip obvious non-chapter links from broad selectors.
+            if not re.search(r"(chapter|chap|ch\.?|episode|ep\.?|\b\d+\b)", text, re.IGNORECASE):
+                continue
+            seen_chapter_urls.add(href)
             chapters.append(Chapter(title=text, url=href, number=parse_chapter_number(text)))
 
         if not chapters:

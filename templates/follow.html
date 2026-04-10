@@ -4,7 +4,7 @@
 <div class="panel">
   <h2 class="title">追更中心</h2>
   <div class="subtle" style="margin-bottom:8px;">
-    已开启追更 {{ total_books }} 本，待更新章节合计 {{ pending_total }} 章。
+    已开启追更 <span id="follow-total-books">{{ total_books }}</span> 本，待更新章节合计 <span id="follow-pending-total">{{ pending_total }}</span> 章。
     如需调整追更开关，请前往
     <a class="btn ghost icon-btn" href="/bookshelf" title="前往书架页" aria-label="前往书架页">
       <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -17,8 +17,12 @@
     <input type="hidden" name="fp" value="{{ pager.page }}" />
     <input type="hidden" name="fps" value="{{ pager.page_size }}" />
   </form>
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;">
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+  <form id="follow-quick-form" method="post" action="/follow/bulk" style="display:none;">
+    <input type="hidden" name="fp" value="{{ pager.page }}" />
+    <input type="hidden" name="fps" value="{{ pager.page_size }}" />
+  </form>
+  <div class="follow-toolbar">
+    <div class="follow-toolbar-left">
       <button class="btn ghost icon-btn" type="button" id="follow-mode-toggle" title="开启多选模式" aria-label="开启多选模式" aria-pressed="false">
         <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M4 6h16M4 12h16M4 18h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
@@ -47,18 +51,33 @@
       <span class="subtle">已选择 <span id="follow-selected-count">0</span> 本</span>
     </div>
       </div>
-    <button id="follow-mode-action" class="btn warn icon-btn" style="display:none;" type="submit" form="follow-bulk-form" name="bulk_action" value="bulk_disable_follow" title="一键取消选中漫画追更" aria-label="一键取消选中漫画追更">
-      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-      </svg>
-      <span class="btn-text">一键取消追更</span>
-    </button>
+    <div class="follow-toolbar-right">
+      <button class="btn ghost icon-btn follow-quick-action" type="submit" form="follow-quick-form" name="bulk_action" value="follow_check_all" title="检查全部追更漫画更新状态" aria-label="检查全部追更漫画更新状态">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">一键检查</span>
+      </button>
+      <button class="btn secondary icon-btn follow-quick-action" type="submit" form="follow-quick-form" name="bulk_action" value="follow_update_all" title="一键更新全部追更漫画" aria-label="一键更新全部追更漫画">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">一键更新</span>
+      </button>
+      <button id="follow-mode-action" class="btn warn icon-btn" style="display:none;" type="submit" form="follow-bulk-form" name="bulk_action" value="bulk_disable_follow" title="一键取消选中漫画追更" aria-label="一键取消选中漫画追更">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">一键取消追更</span>
+      </button>
+    </div>
   </div>
 
   <div class="bookshelf-grid">
     {% if books %}
     {% for book in books %}
-    <div class="book-card">
+    <div class="book-card" id="book-card-{{ book.id }}" data-book-id="{{ book.id }}">
       <label class="follow-check-label" style="display:none;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
         <input class="follow-book-check" type="checkbox" name="book_ids" value="{{ book.id }}" form="follow-bulk-form" />
         选择
@@ -70,14 +89,14 @@
       {% endif %}
       <h3 class="book-title" title="{{ book.title }}">{{ book.title }}</h3>
       <div class="book-meta-list">
-        <div class="book-meta">{{ book.provider_badge_html | safe }}</div>
-        <div class="book-meta">分组：{{ book.group or '未分组' }}</div>
-        <div class="book-meta clamp-1" title="{{ book.downloaded_text }}">{{ book.downloaded_text }}</div>
-        <div class="book-meta clamp-1" title="{{ book.latest_text }}">{{ book.latest_text }}</div>
-        <div class="book-meta clamp-1" title="{{ book.summary_text }}">{{ book.summary_text }}</div>
+        <div class="book-meta book-provider">{{ book.provider_badge_html | safe }}</div>
+        <div class="book-meta book-group">分组：{{ book.group or '未分组' }}</div>
+        <div class="book-meta clamp-1 book-downloaded-text" title="{{ book.downloaded_text }}">{{ book.downloaded_text }}</div>
+        <div class="book-meta clamp-1 book-latest-text" title="{{ book.latest_text }}">{{ book.latest_text }}</div>
+        <div class="book-meta clamp-1 book-summary-text" title="{{ book.summary_text }}">{{ book.summary_text }}</div>
       </div>
       <div class="book-actions">
-        <form method="post" action="/bookshelf/{{ book.id }}/check">
+        <form class="follow-async-book-form" data-async-kind="check" method="post" action="/bookshelf/{{ book.id }}/check">
           <input type="hidden" name="src" value="follow" />
           <input type="hidden" name="fp" value="{{ pager.page }}" />
           <input type="hidden" name="fps" value="{{ pager.page_size }}" />
@@ -89,7 +108,7 @@
             <span class="btn-text">检查</span>
           </button>
         </form>
-        <form method="post" action="/bookshelf/{{ book.id }}/download_updates">
+        <form class="follow-async-book-form" data-async-kind="download_updates" method="post" action="/bookshelf/{{ book.id }}/download_updates">
           <input type="hidden" name="src" value="follow" />
           <input type="hidden" name="fp" value="{{ pager.page }}" />
           <input type="hidden" name="fps" value="{{ pager.page_size }}" />
@@ -100,7 +119,7 @@
             <span class="btn-text">更新</span>
           </button>
         </form>
-        <form method="post" action="/bookshelf/{{ book.id }}/download_all">
+        <form class="follow-async-book-form" data-async-kind="download_all" method="post" action="/bookshelf/{{ book.id }}/download_all">
           <input type="hidden" name="src" value="follow" />
           <input type="hidden" name="fp" value="{{ pager.page }}" />
           <input type="hidden" name="fps" value="{{ pager.page_size }}" />
@@ -111,7 +130,7 @@
             <span class="btn-text">全部</span>
           </button>
         </form>
-        <form method="post" action="/bookshelf/{{ book.id }}/toggle_follow">
+        <form class="follow-async-book-form" data-async-kind="toggle_follow" method="post" action="/bookshelf/{{ book.id }}/toggle_follow">
           <input type="hidden" name="src" value="follow" />
           <input type="hidden" name="fp" value="{{ pager.page }}" />
           <input type="hidden" name="fps" value="{{ pager.page_size }}" />
@@ -122,7 +141,7 @@
             <span class="btn-text">取消追更</span>
           </button>
         </form>
-        <form method="post" action="/bookshelf/{{ book.id }}/remove" onsubmit="return confirm('确认从书架移除？');">
+        <form class="follow-async-book-form" data-async-kind="remove" method="post" action="/bookshelf/{{ book.id }}/remove">
           <input type="hidden" name="src" value="follow" />
           <input type="hidden" name="fp" value="{{ pager.page }}" />
           <input type="hidden" name="fps" value="{{ pager.page_size }}" />
@@ -200,6 +219,10 @@
     const btnInvert = document.getElementById('follow-select-invert');
     const btnClear = document.getElementById('follow-select-clear');
     const bulkForm = document.getElementById('follow-bulk-form');
+    const quickForm = document.getElementById('follow-quick-form');
+    const quickButtons = Array.from(document.querySelectorAll('.follow-quick-action'));
+    const summaryTotalEl = document.getElementById('follow-total-books');
+    const summaryPendingEl = document.getElementById('follow-pending-total');
     if (!countEl || !bulkForm) return;
     let multiSelectEnabled = false;
 
@@ -227,17 +250,213 @@
       updateCount();
     }
 
+    function setButtonBusy(button, busy, busyText) {
+      if (!button) return;
+      if (busy) {
+        button.disabled = true;
+        button.dataset.prevText = button.dataset.prevText || ((button.querySelector('.btn-text') || {}).textContent || '');
+        const textEl = button.querySelector('.btn-text');
+        if (textEl && busyText) textEl.textContent = busyText;
+      } else {
+        button.disabled = false;
+        const textEl = button.querySelector('.btn-text');
+        if (textEl && button.dataset.prevText) textEl.textContent = button.dataset.prevText;
+      }
+    }
+
+    async function fetchJson(url, options) {
+      const init = Object.assign({ method: 'GET' }, options || {});
+      init.headers = Object.assign(
+        { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+        init.headers || {}
+      );
+      const resp = await fetch(url, init);
+      let data = {};
+      try { data = await resp.json(); } catch (err) { data = {}; }
+      if (!resp.ok || data.ok === false) {
+        throw new Error((data && data.message) || ('请求失败（' + resp.status + '）'));
+      }
+      return data;
+    }
+
+    function setSummary(totalBooks, pendingTotal) {
+      if (summaryTotalEl && typeof totalBooks === 'number') summaryTotalEl.textContent = String(totalBooks);
+      if (summaryPendingEl && typeof pendingTotal === 'number') summaryPendingEl.textContent = String(pendingTotal);
+    }
+
+    async function refreshFollowSummary() {
+      const data = await fetchJson('/follow/summary');
+      setSummary(Number(data.total_books || 0), Number(data.pending_total || 0));
+    }
+
+    function applyBookPayload(card, book) {
+      if (!card || !book) return;
+      const titleEl = card.querySelector('.book-title');
+      if (titleEl) {
+        titleEl.textContent = book.title || '';
+        titleEl.title = book.title || '';
+      }
+      const downloadedEl = card.querySelector('.book-downloaded-text');
+      if (downloadedEl) {
+        downloadedEl.textContent = book.downloaded_text || '';
+        downloadedEl.title = book.downloaded_text || '';
+      }
+      const latestEl = card.querySelector('.book-latest-text');
+      if (latestEl) {
+        latestEl.textContent = book.latest_text || '';
+        latestEl.title = book.latest_text || '';
+      }
+      const summaryEl = card.querySelector('.book-summary-text');
+      if (summaryEl) {
+        summaryEl.textContent = book.summary_text || '';
+        summaryEl.title = book.summary_text || '';
+      }
+    }
+
+    async function refreshBookCard(bookId) {
+      if (!bookId) return;
+      const card = document.querySelector('.book-card[data-book-id="' + bookId + '"]');
+      if (!card) return;
+      const data = await fetchJson('/api/books/' + encodeURIComponent(bookId));
+      if (data.book) applyBookPayload(card, data.book);
+    }
+
+    async function refreshVisibleCards() {
+      const ids = Array.from(document.querySelectorAll('.book-card[data-book-id]'))
+        .map((node) => String(node.getAttribute('data-book-id') || '').trim())
+        .filter(Boolean);
+      await Promise.all(ids.map((id) => refreshBookCard(id)));
+    }
+
+    async function waitJob(jobId, timeoutMs) {
+      const timeout = Number(timeoutMs || 30 * 60 * 1000);
+      const startedAt = Date.now();
+      while (true) {
+        const state = await fetchJson('/job/' + encodeURIComponent(jobId) + '/state');
+        const status = String(state.status || '').toLowerCase();
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          return state;
+        }
+        if (Date.now() - startedAt > timeout) {
+          throw new Error('等待任务超时，请稍后到进度页查看。');
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+
+    async function waitJobs(jobIds) {
+      for (const jobId of (jobIds || [])) {
+        if (!jobId) continue;
+        await waitJob(String(jobId));
+      }
+    }
+
     if (modeToggle) modeToggle.addEventListener('click', function () { setMultiSelectEnabled(!multiSelectEnabled); });
     checks.forEach((item) => item.addEventListener('change', updateCount));
     if (btnAll) btnAll.addEventListener('click', function () { checks.forEach((item) => { item.checked = true; }); updateCount(); });
     if (btnInvert) btnInvert.addEventListener('click', function () { checks.forEach((item) => { item.checked = !item.checked; }); updateCount(); });
     if (btnClear) btnClear.addEventListener('click', function () { checks.forEach((item) => { item.checked = false; }); updateCount(); });
-    bulkForm.addEventListener('submit', function (event) {
+    bulkForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
       if (!multiSelectEnabled || !checks.some((item) => item.checked)) {
-        event.preventDefault();
         alert('请先开启多选并选择至少一本漫画。');
+        return;
+      }
+      const submitBtn = modeAction;
+      try {
+        setButtonBusy(submitBtn, true, '处理中');
+        const formData = new FormData(bulkForm);
+        formData.set('bulk_action', 'bulk_disable_follow');
+        formData.set('ajax', '1');
+        await fetchJson('/follow/bulk', { method: 'POST', body: formData });
+        checks.forEach((item) => {
+          if (!item.checked) return;
+          const card = item.closest('.book-card');
+          if (card) card.remove();
+        });
+        setMultiSelectEnabled(false);
+        await refreshFollowSummary();
+      } catch (err) {
+        alert((err && err.message) || '批量取消追更失败。');
+      } finally {
+        setButtonBusy(submitBtn, false);
       }
     });
+
+    quickButtons.forEach((button) => {
+      button.addEventListener('click', async function (event) {
+        event.preventDefault();
+        if (!quickForm) return;
+        const action = String(button.value || '').trim();
+        if (!action) return;
+        try {
+          setButtonBusy(button, true, action === 'follow_update_all' ? '处理中' : '检查中');
+          const formData = new FormData(quickForm);
+          formData.set('bulk_action', action);
+          formData.set('ajax', '1');
+          const data = await fetchJson('/follow/bulk', { method: 'POST', body: formData });
+          if (action === 'follow_update_all' && Array.isArray(data.job_ids) && data.job_ids.length > 0) {
+            await waitJobs(data.job_ids);
+          }
+          await refreshFollowSummary();
+          await refreshVisibleCards();
+        } catch (err) {
+          alert((err && err.message) || '批量操作失败。');
+        } finally {
+          setButtonBusy(button, false);
+        }
+      });
+    });
+
+    document.querySelectorAll('form.follow-async-book-form').forEach((form) => {
+      form.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        const kind = String(form.dataset.asyncKind || '').trim().toLowerCase();
+        const submitBtn = form.querySelector('button[type="submit"]');
+        const card = form.closest('.book-card');
+        const bookId = card ? String(card.getAttribute('data-book-id') || '').trim() : '';
+        if (kind === 'remove') {
+          const ok = window.confirm('确认从书架移除？');
+          if (!ok) return;
+        }
+        try {
+          let busyText = '处理中';
+          if (kind === 'check') busyText = '检查中';
+          if (kind === 'download_updates' || kind === 'download_all') busyText = '创建中';
+          if (kind === 'remove') busyText = '移除中';
+          if (kind === 'toggle_follow') busyText = '处理中';
+          setButtonBusy(submitBtn, true, busyText);
+          const formData = new FormData(form);
+          formData.set('ajax', '1');
+          const data = await fetchJson(form.action, { method: 'POST', body: formData });
+          if (data.book && card) applyBookPayload(card, data.book);
+          if (kind === 'remove' && card) {
+            card.remove();
+            await refreshFollowSummary();
+            return;
+          }
+          if (kind === 'toggle_follow' && card) {
+            if (!data.book || data.book.follow_enabled === false) {
+              card.remove();
+            }
+            await refreshFollowSummary();
+            return;
+          }
+          if (data.job_id) {
+            await waitJob(String(data.job_id));
+            if (bookId) await refreshBookCard(bookId);
+            await refreshFollowSummary();
+          } else if (kind === 'check' || data.no_job) {
+            await refreshFollowSummary();
+          }
+        } catch (err) {
+          alert((err && err.message) || '操作失败。');
+        } finally {
+          setButtonBusy(submitBtn, false);
+        }
+      });
+    });
+
     setMultiSelectEnabled(false);
   })();
 </script>

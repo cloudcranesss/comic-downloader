@@ -770,6 +770,24 @@ def pop_flash_message(request: web.Request) -> str:
     return str(request.query.get("msg", "") or "").strip()
 
 
+def request_wants_json(request: web.Request, form: Optional[Any] = None) -> bool:
+    xrw = str(request.headers.get("X-Requested-With", "") or "").strip().lower()
+    if xrw == "xmlhttprequest":
+        return True
+    accept = str(request.headers.get("Accept", "") or "").lower()
+    if "application/json" in accept:
+        return True
+    if form is not None:
+        try:
+            flag = str(form.get("ajax", "") or "").strip().lower()
+            if flag in {"1", "true", "yes", "on"}:
+                return True
+        except Exception:
+            pass
+    qflag = str(request.query.get("ajax", "") or "").strip().lower()
+    return qflag in {"1", "true", "yes", "on"}
+
+
 @web.middleware
 async def flash_message_middleware(request: web.Request, handler: Callable[..., Any]) -> web.StreamResponse:
     raw_cookie = str(request.cookies.get(FLASH_MSG_COOKIE, "") or "")
@@ -940,6 +958,7 @@ async def fetch_toonily_cover_url(
 
 def parse_search_results(html: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
+    series_href_re = re.compile(r"/(serie|series)/", re.IGNORECASE)
     selectors = [
         "div.page-item-detail.manga h3.h5 a",
         "div.c-tabs-item__content .post-title h3 a",
@@ -947,6 +966,7 @@ def parse_search_results(html: str) -> list[dict[str, Any]]:
         "div.post-title h3 a",
         "h3.h5 a[href*='/serie/']",
         "a[href*='/serie/']",
+        "a[href*='/series/']",
     ]
 
     seen: set[str] = set()
@@ -955,7 +975,7 @@ def parse_search_results(html: str) -> list[dict[str, Any]]:
     for selector in selectors:
         for a in soup.select(selector):
             href = (a.get("href") or "").strip()
-            if "/serie/" not in href:
+            if not series_href_re.search(href):
                 continue
             url = normalize_url(urljoin("https://toonily.com", href))
             if url in seen:
@@ -993,6 +1013,31 @@ def parse_search_results(html: str) -> list[dict[str, Any]]:
             seen.add(url)
             if len(results) >= 40:
                 return results
+
+    # Fallback: toonily occasionally renders search results via script/json rather than anchor cards.
+    if len(results) < 40:
+        pattern = re.compile(
+            r"(https?://(?:www\.)?toonily\.com/(?:serie|series)/[a-z0-9][a-z0-9-]*/?)",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            candidate = normalize_url(match.group(1))
+            if not candidate or candidate in seen:
+                continue
+            slug = candidate.rstrip("/").split("/")[-1]
+            slug_without_hash = re.sub(r"-[0-9a-f]{6,}$", "", slug, flags=re.IGNORECASE)
+            guessed_title = " ".join(part for part in slug_without_hash.split("-") if part).strip() or slug
+            results.append(
+                {
+                    "title": guessed_title.title(),
+                    "url": candidate,
+                    "latest": "",
+                    "cover": "",
+                }
+            )
+            seen.add(candidate)
+            if len(results) >= 40:
+                break
     return results
 
 
@@ -1002,13 +1047,19 @@ def extract_series_url_hint(html: str) -> str:
     og_url = soup.select_one("meta[property='og:url']")
     if og_url is not None:
         candidate = normalize_url(str(og_url.get("content") or ""))
-        if "/serie/" in candidate:
+        if "/serie/" in candidate or "/series/" in candidate:
             return candidate
 
-    match = re.search(r'"base_url"\s*:\s*"([^"]+?/serie/[^"]+?)"', html)
+    canonical = soup.select_one("link[rel='canonical']")
+    if canonical is not None:
+        candidate = normalize_url(str(canonical.get("href") or ""))
+        if "/serie/" in candidate or "/series/" in candidate:
+            return candidate
+
+    match = re.search(r'"base_url"\s*:\s*"([^"]+?/(?:serie|series)/[^"]+?)"', html)
     if match:
         candidate = normalize_url(match.group(1).replace("\\/", "/"))
-        if "/serie/" in candidate:
+        if "/serie/" in candidate or "/series/" in candidate:
             return candidate
 
     return ""
@@ -1025,10 +1076,34 @@ async def search_toonily(state: UIState, keyword: str) -> list[dict[str, Any]]:
     if not keyword:
         return []
 
+    if keyword.startswith(("http://", "https://")) and ("/serie/" in keyword or "/series/" in keyword):
+        hinted_url = normalize_url(keyword)
+        hinted_title = hinted_url.rstrip("/").split("/")[-1].replace("-", " ")
+        try:
+            snapshot_title, _ = await fetch_series_snapshot_toonily(state, hinted_url)
+            if snapshot_title:
+                hinted_title = snapshot_title
+        except Exception:
+            pass
+        hinted_cover = ""
+        try:
+            hinted_cover = await fetch_toonily_cover_url(state, hinted_url)
+        except Exception:
+            hinted_cover = ""
+        return [
+            {
+                "title": hinted_title,
+                "url": hinted_url,
+                "latest": "",
+                "cover": hinted_cover,
+            }
+        ]
+
     query_urls: list[str] = []
     slug = slugify_keyword(keyword)
     if slug:
         query_urls.append(f"https://toonily.com/search/{slug}")
+    query_urls.append(f"https://toonily.com/?s={quote_plus(keyword)}")
     query_urls.append(f"https://toonily.com/?s={quote_plus(keyword)}&post_type=wp-manga")
 
     merged: list[dict[str, Any]] = []
@@ -1072,7 +1147,11 @@ async def search_toonily(state: UIState, keyword: str) -> list[dict[str, Any]]:
         if merged:
             break
 
-    if not merged and keyword.startswith(("http://", "https://")) and "/serie/" in keyword:
+    if (
+        not merged
+        and keyword.startswith(("http://", "https://"))
+        and ("/serie/" in keyword or "/series/" in keyword)
+    ):
         hinted_url = normalize_url(keyword)
         hinted_cover = ""
         try:
@@ -1859,17 +1938,18 @@ def render_layout(
         "    .job-actions .icon-btn,\n"
         "    html[data-view-mode='list'] .book-card > .book-actions .icon-btn,\n"
         "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .icon-btn {\n"
-        "      min-width: 28px;\n"
-        "      min-height: 28px;\n"
-        "      padding: 5px;\n"
-        "      gap: 0;\n"
+        "      min-width: 72px;\n"
+        "      min-height: 32px;\n"
+        "      padding: 6px 8px;\n"
+        "      gap: 4px;\n"
         "    }\n"
         "    .actions .icon-btn .btn-text,\n"
         "    .book-actions .icon-btn .btn-text,\n"
         "    .job-actions .icon-btn .btn-text,\n"
         "    html[data-view-mode='list'] .book-card > .book-actions .icon-btn .btn-text,\n"
         "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .icon-btn .btn-text {\n"
-        "      display: none;\n"
+        "      display: inline-block;\n"
+        "      max-width: 74px;\n"
         "    }\n"
         "    html[data-compact='1'] .subtle { font-size: 12px; }\n"
         "    .result-card {\n"
@@ -2027,14 +2107,41 @@ def render_layout(
         "    }\n"
         "    .book-actions .btn {\n"
         "      width: 100%;\n"
-        "      min-width: 28px;\n"
-        "      min-height: 28px;\n"
-        "      padding: 5px;\n"
+        "      min-width: 72px;\n"
+        "      min-height: 32px;\n"
+        "      padding: 6px 8px;\n"
         "      border-radius: 8px;\n"
         "    }\n"
         "    .book-actions .btn-icon {\n"
-        "      width: 13px;\n"
-        "      height: 13px;\n"
+        "      width: 12px;\n"
+        "      height: 12px;\n"
+        "    }\n"
+        "    .follow-page .follow-toolbar {\n"
+        "      display: flex;\n"
+        "      justify-content: space-between;\n"
+        "      align-items: flex-start;\n"
+        "      gap: 8px;\n"
+        "      flex-wrap: wrap;\n"
+        "      margin: 8px 0 12px;\n"
+        "    }\n"
+        "    .follow-page .follow-toolbar-left,\n"
+        "    .follow-page .follow-toolbar-right {\n"
+        "      display: flex;\n"
+        "      align-items: center;\n"
+        "      gap: 6px;\n"
+        "      flex-wrap: wrap;\n"
+        "    }\n"
+        "    .follow-page .book-actions {\n"
+        "      grid-template-columns: repeat(2, minmax(0, 1fr));\n"
+        "      gap: 6px;\n"
+        "    }\n"
+        "    .follow-page .book-actions .btn {\n"
+        "      min-width: 0;\n"
+        "      font-size: 12px;\n"
+        "      padding: 6px;\n"
+        "    }\n"
+        "    .follow-page .book-actions .btn-text {\n"
+        "      max-width: 56px;\n"
         "    }\n"
         "    html[data-view-mode='list'] .result-grid,\n"
         "    html[data-view-mode='list'] .bookshelf-grid {\n"
@@ -2086,17 +2193,18 @@ def render_layout(
         "      grid-area: actions;\n"
         "      margin: 0;\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(2, 28px);\n"
+        "      grid-template-columns: 1fr;\n"
+        "      min-width: 88px;\n"
         "      justify-content: center;\n"
         "      align-content: center;\n"
         "      gap: 5px;\n"
         "      align-self: center;\n"
         "    }\n"
         "    html[data-view-mode='list'] .result-card > .actions .btn {\n"
-        "      width: 28px;\n"
-        "      min-width: 28px;\n"
-        "      min-height: 28px;\n"
-        "      padding: 5px;\n"
+        "      width: 100%;\n"
+        "      min-width: 88px;\n"
+        "      min-height: 32px;\n"
+        "      padding: 6px 8px;\n"
         "    }\n"
         "    html[data-view-mode='list'] .book-card {\n"
         "      display: grid;\n"
@@ -2149,20 +2257,21 @@ def render_layout(
         "      grid-area: actions;\n"
         "      margin: 0;\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(2, 28px);\n"
+        "      grid-template-columns: 1fr;\n"
+        "      min-width: 88px;\n"
         "      justify-content: center;\n"
         "      align-content: center;\n"
         "      gap: 5px;\n"
         "      align-self: center;\n"
         "    }\n"
         "    html[data-view-mode='list'] .book-card > .book-actions .btn {\n"
-        "      width: 28px;\n"
-        "      min-width: 28px;\n"
-        "      min-height: 28px;\n"
-        "      padding: 5px;\n"
+        "      width: 100%;\n"
+        "      min-width: 88px;\n"
+        "      min-height: 32px;\n"
+        "      padding: 6px 8px;\n"
         "    }\n"
         "    html[data-view-mode='list'] .follow-page .book-card {\n"
-        "      grid-template-columns: 78px minmax(0, 1fr) auto;\n"
+        "      grid-template-columns: 78px minmax(0, 1fr) minmax(132px, 34%);\n"
         "      grid-template-areas:\n"
         "        'cover select actions'\n"
         "        'cover title actions'\n"
@@ -2204,17 +2313,18 @@ def render_layout(
         "      grid-area: actions;\n"
         "      margin: 0;\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(2, 28px);\n"
+        "      grid-template-columns: repeat(2, minmax(0, 1fr));\n"
+        "      min-width: 132px;\n"
         "      justify-content: center;\n"
         "      align-content: center;\n"
-        "      gap: 5px;\n"
+        "      gap: 4px;\n"
         "      align-self: center;\n"
         "    }\n"
         "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .btn {\n"
-        "      width: 28px;\n"
-        "      min-width: 28px;\n"
-        "      min-height: 28px;\n"
-        "      padding: 5px;\n"
+        "      width: 100%;\n"
+        "      min-width: 0;\n"
+        "      min-height: 32px;\n"
+        "      padding: 6px;\n"
         "    }\n"
         "    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }\n"
         "    .stat-card {\n"
@@ -2377,6 +2487,10 @@ def render_layout(
         "      .book-card { min-height: 330px; }\n"
         "      .actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n"
         "      .job-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n"
+        "      .follow-page .follow-toolbar { flex-direction: column; align-items: stretch; }\n"
+        "      .follow-page .follow-toolbar-left,\n"
+        "      .follow-page .follow-toolbar-right { width: 100%; }\n"
+        "      .follow-page .book-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n"
         "      .settings-grid { grid-template-columns: 1fr; }\n"
         "    }\n"
         "  </style>\n"
@@ -3734,18 +3848,128 @@ async def handle_follow(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
+async def handle_follow_summary(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    follow_books = [book for book in state.list_books() if bool(book.get("follow_enabled", True))]
+    pending_total = sum(max(0, int(book.get("pending_update_count", 0))) for book in follow_books)
+    return web.json_response(
+        {
+            "ok": True,
+            "total_books": len(follow_books),
+            "pending_total": pending_total,
+        }
+    )
+
+
 async def handle_follow_bulk(request: web.Request) -> web.StreamResponse:
     state = get_app_state(request)
     form = await request.post()
+    ajax = request_wants_json(request, form)
     page = parse_int(form.get("fp", "1"), 1, minimum=1, maximum=999)
     page_size = parse_int(form.get("fps", "24"), 24, minimum=6, maximum=60)
     bulk_action = str(form.get("bulk_action", "")).strip().lower()
-    selected_ids = list(dict.fromkeys(form_getall_str(form, "book_ids")))
+    raw_selected_ids: list[str] = []
+    if hasattr(form, "getall"):
+        try:
+            raw_selected_ids = [str(v).strip() for v in form.getall("book_ids") if str(v).strip()]
+        except KeyError:
+            raw_selected_ids = []
+    else:
+        value = str(form.get("book_ids", "") or "").strip() if hasattr(form, "get") else ""
+        if value:
+            raw_selected_ids = [value]
+    selected_ids = list(dict.fromkeys(raw_selected_ids))
 
     def back_redirect(message: str) -> web.HTTPSeeOther:
         return build_redirect("/follow", msg=message, fp=page, fps=page_size)
 
+    follow_books = [book for book in state.list_books() if bool(book.get("follow_enabled", True))]
+
+    if bulk_action == "follow_check_all":
+        if not follow_books:
+            if ajax:
+                return web.json_response({"ok": False, "message": "当前没有开启追更的漫画。"}, status=400)
+            raise back_redirect("当前没有开启追更的漫画。")
+        checked = 0
+        failed = 0
+        for book in follow_books:
+            try:
+                await refresh_book_snapshot(state, book)
+                checked += 1
+            except Exception:
+                failed += 1
+        await state.save_bookshelf()
+        pending_total = sum(max(0, int(book.get("pending_update_count", 0))) for book in follow_books)
+        if failed:
+            message = f"一键检查完成：成功 {checked} 本，失败 {failed} 本，待更新合计 {pending_total} 章。"
+            if ajax:
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "checked": checked,
+                        "failed": failed,
+                        "total_books": len(follow_books),
+                        "pending_total": pending_total,
+                    }
+                )
+            raise back_redirect(message)
+        message = f"一键检查完成：已检查 {checked} 本，待更新合计 {pending_total} 章。"
+        if ajax:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "message": message,
+                    "checked": checked,
+                    "failed": 0,
+                    "total_books": len(follow_books),
+                    "pending_total": pending_total,
+                }
+            )
+        raise back_redirect(message)
+
+    if bulk_action == "follow_update_all":
+        if not follow_books:
+            if ajax:
+                return web.json_response({"ok": False, "message": "当前没有开启追更的漫画。"}, status=400)
+            raise back_redirect("当前没有开启追更的漫画。")
+        queued = 0
+        no_update = 0
+        failed = 0
+        job_ids: list[str] = []
+        for book in follow_books:
+            created, detail = await enqueue_book_updates_job(
+                state,
+                book,
+                source_message="由追更页一键更新创建。",
+            )
+            if created:
+                queued += 1
+                if detail:
+                    job_ids.append(detail)
+            elif detail:
+                failed += 1
+            else:
+                no_update += 1
+        dispatch_jobs(state)
+        await state.save_bookshelf()
+        message = f"一键更新完成：已创建 {queued} 个任务，无更新 {no_update} 本，失败 {failed} 本。"
+        if ajax:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "message": message,
+                    "queued": queued,
+                    "no_update": no_update,
+                    "failed": failed,
+                    "job_ids": job_ids,
+                }
+            )
+        raise back_redirect(message)
+
     if not selected_ids:
+        if ajax:
+            return web.json_response({"ok": False, "message": "请先选择至少一本漫画。"}, status=400)
         raise back_redirect("请先选择至少一本漫画。")
 
     selected_books: list[dict[str, Any]] = []
@@ -3754,6 +3978,8 @@ async def handle_follow_bulk(request: web.Request) -> web.StreamResponse:
         if book is not None:
             selected_books.append(book)
     if not selected_books:
+        if ajax:
+            return web.json_response({"ok": False, "message": "所选项目不存在或已被移除。"}, status=404)
         raise back_redirect("所选项目不存在或已被移除。")
 
     if bulk_action == "bulk_disable_follow":
@@ -3763,8 +3989,13 @@ async def handle_follow_bulk(request: web.Request) -> web.StreamResponse:
                 book["follow_enabled"] = False
                 changed += 1
         await state.save_bookshelf()
-        raise back_redirect(f"已取消 {changed} 本漫画的追更。")
+        message = f"已取消 {changed} 本漫画的追更。"
+        if ajax:
+            return web.json_response({"ok": True, "message": message, "changed": changed})
+        raise back_redirect(message)
 
+    if ajax:
+        return web.json_response({"ok": False, "message": "未知批量操作。"}, status=400)
     raise back_redirect("未知批量操作。")
 
 
@@ -4069,6 +4300,7 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
 async def handle_book_action(request: web.Request) -> web.StreamResponse:
     state = get_app_state(request)
     form = await request.post()
+    ajax = request_wants_json(request, form)
     src = str(form.get("src", "bookshelf")).strip().lower()
     if src == "follow":
         page = parse_int(form.get("fp", "1"), 1, minimum=1, maximum=999)
@@ -4091,24 +4323,51 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
     action = request.match_info["action"]
     book = state.get_book(book_id)
     if book is None:
+        if ajax:
+            return web.json_response({"ok": False, "message": "书架项目不存在。"}, status=404)
         raise back_redirect("书架项目不存在。")
 
     if action == "remove":
         state.remove_book(book_id)
         await state.save_bookshelf()
+        if ajax:
+            return web.json_response({"ok": True, "message": "已移除。", "removed": True, "book_id": book_id})
         raise back_redirect("已移除。")
 
     if action == "toggle_follow":
         book["follow_enabled"] = not bool(book.get("follow_enabled", True))
         await state.save_bookshelf()
-        raise back_redirect(f"追更已{'开启' if book['follow_enabled'] else '关闭'}。")
+        message = f"追更已{'开启' if book['follow_enabled'] else '关闭'}。"
+        if ajax:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "message": message,
+                    "book": build_book_card_payload(book),
+                    "book_id": str(book.get("id") or ""),
+                }
+            )
+        raise back_redirect(message)
 
     if action == "check":
         try:
             pending = await refresh_book_snapshot(state, book)
             await state.save_bookshelf()
-            raise back_redirect(f"检查完成，待更新 {len(pending)} 章。")
+            message = f"检查完成，待更新 {len(pending)} 章。"
+            if ajax:
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "book": build_book_card_payload(book),
+                        "book_id": str(book.get("id") or ""),
+                        "pending_count": len(pending),
+                    }
+                )
+            raise back_redirect(message)
         except Exception as exc:
+            if ajax:
+                return web.json_response({"ok": False, "message": f"检查失败：{exc}"}, status=400)
             raise back_redirect(f"检查失败：{exc}")
 
     if action in {"download_updates", "download_all"}:
@@ -4122,21 +4381,34 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
                 book["series_url"],
             )
         except Exception as exc:
+            if ajax:
+                return web.json_response({"ok": False, "message": f"读取章节失败：{exc}"}, status=400)
             raise back_redirect(f"读取章节失败：{exc}")
 
         if action == "download_updates":
             pending = compute_pending_chapters(book, chapters)
             chapter_urls = [item.url for item in pending]
+            set_site_latest_fields(book, chapters)
+            book["pending_update_count"] = len(chapter_urls)
+            book["last_checked_at"] = now_iso()
             if not chapter_urls:
-                set_site_latest_fields(book, chapters)
-                book["pending_update_count"] = 0
-                book["last_checked_at"] = now_iso()
                 await state.save_bookshelf()
+                if ajax:
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "message": "没有新的章节需要下载。",
+                            "no_job": True,
+                            "book": build_book_card_payload(book),
+                            "book_id": str(book.get("id") or ""),
+                        }
+                    )
                 raise back_redirect("没有新的章节需要下载。")
             title = f"下载更新：{book['title']} ({len(chapter_urls)} 章)"
         else:
             title = f"下载全部：{book['title']}"
 
+        await state.save_bookshelf()
         job = state.create_job(
             title=title,
             series_url=book["series_url"],
@@ -4147,9 +4419,31 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
             provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
         )
         dispatch_jobs(state)
+        if ajax:
+            return web.json_response(
+                {
+                    "ok": True,
+                    "message": "任务已创建。",
+                    "job_id": str(job.get("id") or ""),
+                    "book_id": str(book.get("id") or ""),
+                    "mode": mode,
+                }
+            )
         raise back_redirect("任务已创建。")
 
+    if ajax:
+        return web.json_response({"ok": False, "message": "未知操作。"}, status=400)
     raise back_redirect("未知操作。")
+
+
+async def handle_book_card(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    book_id = str(request.match_info.get("book_id") or "").strip()
+    book = state.get_book(book_id)
+    if book is None:
+        return web.json_response({"ok": False, "message": "book_not_found"}, status=404)
+    return web.json_response({"ok": True, "book": build_book_card_payload(book)})
+
 
 async def handle_settings_get(request: web.Request) -> web.Response:
     state = get_app_state(request)
@@ -4452,11 +4746,13 @@ def create_app() -> web.Application:
             web.post("/bookshelf/jm-login", handle_bookshelf_jm_login),
             web.post("/bookshelf/jm-logout", handle_bookshelf_jm_logout),
             web.get("/follow", handle_follow),
+            web.get("/follow/summary", handle_follow_summary),
             web.post("/follow/bulk", handle_follow_bulk),
             web.get("/health", handle_health),
             web.post("/bookshelf/sync-jm-favorites", handle_bookshelf_sync_jm_favorites),
             web.post("/bookshelf/bulk", handle_bookshelf_bulk),
             web.post("/bookshelf/{book_id}/{action}", handle_book_action),
+            web.get("/api/books/{book_id}", handle_book_card),
             web.get("/settings", handle_settings_get),
             web.post("/settings", handle_settings_post),
             web.get("/job/{job_id}/state", handle_job_state),
