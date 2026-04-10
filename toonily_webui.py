@@ -942,7 +942,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      grid-template-columns: repeat(auto-fill, minmax(180px, 220px));\n"
         "      gap: 12px;\n"
         "      justify-content: start;\n"
-        "      align-items: start;\n"
+        "      align-items: stretch;\n"
         "    }\n"
         "    .search-form { display: flex; gap: 10px; flex-wrap: wrap; }\n"
         "    .input,\n"
@@ -986,6 +986,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      flex-direction: column;\n"
         "      gap: 8px;\n"
         "      min-height: 180px;\n"
+        "      height: 100%;\n"
         "    }\n"
         "    .result-cover-wrap {\n"
         "      width: 100%;\n"
@@ -1009,8 +1010,32 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      font-size: 13px;\n"
         "      letter-spacing: 0.4px;\n"
         "    }\n"
-        "    .result-title { font-size: 16px; font-weight: 700; line-height: 1.35; }\n"
-        "    .link { color: #93c5fd; word-break: break-all; text-decoration: none; }\n"
+        "    .result-title {\n"
+        "      font-size: 16px;\n"
+        "      font-weight: 700;\n"
+        "      line-height: 1.35;\n"
+        "      min-height: calc(1.35em * 4);\n"
+        "      display: -webkit-box;\n"
+        "      -webkit-line-clamp: 4;\n"
+        "      -webkit-box-orient: vertical;\n"
+        "      overflow: hidden;\n"
+        "    }\n"
+        "    .link { color: #93c5fd; text-decoration: none; }\n"
+        "    .result-link {\n"
+        "      word-break: break-all;\n"
+        "      line-height: 1.35;\n"
+        "      min-height: calc(1.35em * 2);\n"
+        "      display: -webkit-box;\n"
+        "      -webkit-line-clamp: 2;\n"
+        "      -webkit-box-orient: vertical;\n"
+        "      overflow: hidden;\n"
+        "    }\n"
+        "    .result-latest {\n"
+        "      white-space: nowrap;\n"
+        "      overflow: hidden;\n"
+        "      text-overflow: ellipsis;\n"
+        "      min-height: 1.4em;\n"
+        "    }\n"
         "    .link:hover { text-decoration: underline; }\n"
         "    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }\n"
         "    .actions form { margin: 0; }\n"
@@ -1385,9 +1410,9 @@ def render_dashboard(
 
         cards: list[str] = []
         for item in page_results:
-            title = item.get("title", "")
-            url = item.get("url", "")
-            latest = item.get("latest", "")
+            title = str(item.get("title", "") or "")
+            url = str(item.get("url", "") or "")
+            latest = str(item.get("latest", "") or "")
             cover = item.get("cover", "")
             provider_id = str(item.get("provider_id") or state.last_search_provider or DEFAULT_PROVIDER_ID)
             provider_badge = render_provider_badge(provider_id)
@@ -1407,10 +1432,10 @@ def render_dashboard(
             card = (
                 "<div class=\"result-card\">"
                 f"{cover_html}"
-                f"<div class=\"result-title\">{escape(title)}</div>"
+                f"<div class=\"result-title\" title=\"{escape(title)}\">{escape(title)}</div>"
                 f"<div>{provider_badge}</div>"
-                f"<a class=\"link\" href=\"{escape(url)}\" target=\"_blank\" rel=\"noreferrer\">{escape(url)}</a>"
-                f"<div class=\"subtle\">最新章节：{escape(latest or '-')}</div>"
+                f"<a class=\"link result-link\" href=\"{escape(url)}\" title=\"{escape(url)}\" target=\"_blank\" rel=\"noreferrer\">{escape(url)}</a>"
+                f"<div class=\"subtle result-latest\" title=\"最新章节：{escape(latest or '-')}\">最新章节：{escape(latest or '-')}</div>"
                 "<div class=\"actions\">"
                 "<form method=\"post\" action=\"/search/action\">"
                 f"<input type=\"hidden\" name=\"provider_id\" value=\"{escape(provider_id)}\" />"
