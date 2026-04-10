@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+downloads/
+bookshelf.json
+webui_settings.json
+
