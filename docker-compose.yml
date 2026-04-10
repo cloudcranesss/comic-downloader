@@ -1,8 +1,6 @@
 services:
   comic-downloader:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/cloudcranesss/comic-downloader:${APP_VERSION:-v1.0.0}
     container_name: comic-downloader
     ports:
       - "8000:8000"
@@ -29,4 +27,3 @@ services:
 
 volumes:
   redis_data:
-
