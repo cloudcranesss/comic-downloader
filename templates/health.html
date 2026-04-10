@@ -1,0 +1,50 @@
+{{ message_html | safe }}
+
+<div class="panel">
+  <h2 class="title">计划任务状态</h2>
+  <div class="subtle" style="margin-bottom:8px;">
+    开关：{% if scheduler.enabled %}开启{% else %}关闭{% endif %} |
+    间隔：{{ scheduler.interval_minutes }} 分钟 |
+    自动下载：{% if scheduler.auto_download %}是{% else %}否{% endif %}
+  </div>
+  <div class="subtle" style="margin-bottom:10px;">
+    上次执行：{{ scheduler.last_run_at }} | 下次执行：{{ scheduler.next_run_at }}
+    {% if scheduler.running %}| 当前状态：执行中{% endif %}
+  </div>
+  <form method="post" action="/scheduler/run">
+    <button class="btn secondary" type="submit">立即执行一次计划任务</button>
+  </form>
+</div>
+
+<div class="panel">
+  <h2 class="title">站点健康监控</h2>
+  <div class="subtle" style="margin-bottom:10px;">展示站点可用性、平均下载速度与失败原因分布。</div>
+  <div class="grid">
+    {% for row in rows %}
+    <div class="stat-card">
+      <div class="stat-label">{{ row.provider_name }}</div>
+      <div class="stat-value" style="font-size:16px;">
+        {% if row.available %}可用{% else %}不可用{% endif %}
+      </div>
+      <div class="subtle" style="margin-top:6px;">最近检查：{{ row.last_check_at }}</div>
+      {% if row.last_error %}
+      <div class="subtle" style="margin-top:4px;color:#b91c1c;">最近错误：{{ row.last_error }}</div>
+      {% endif %}
+      <div class="subtle" style="margin-top:8px;">
+        任务：{{ row.total_jobs }}（成功 {{ row.success_jobs }} / 失败 {{ row.failed_jobs }}）
+      </div>
+      <div class="subtle" style="margin-top:4px;">平均速度：{{ row.avg_speed_kbps }} KB/s</div>
+      <div class="subtle" style="margin-top:8px;">失败原因分布：</div>
+      {% if row.failure_reasons %}
+      <div class="subtle">
+        {% for reason, count in row.failure_reasons %}
+        <div>{{ reason }} × {{ count }}</div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="subtle">暂无</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>

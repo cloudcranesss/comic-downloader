@@ -3,24 +3,46 @@
 <div class="panel">
   <h2 class="title">JM 收藏同步</h2>
   {% if sync.jm_enabled %}
-  <div class="subtle" style="margin-bottom:8px;">
+  <div class="subtle" style="margin-bottom:6px;">
     {% if sync.has_jm_login %}
     JM 登录已配置：{{ sync.jm_username }}
     {% else %}
     JM 登录未配置，请先到设置页填写用户名和密码。
     {% endif %}
   </div>
+  <div class="subtle" style="margin-bottom:8px;">
+    手动登录状态：
+    {% if sync.manual_logged_in %}
+    已登录（{{ sync.manual_login_user or sync.jm_username }}）
+    {% else %}
+    未登录
+    {% endif %}
+  </div>
   {% if sync.has_jm_login %}
-  <form method="post" action="/bookshelf/sync-jm-favorites">
-    <input type="hidden" name="bp" value="{{ pager.page }}" />
-    <input type="hidden" name="bps" value="{{ pager.page_size }}" />
-    <button class="btn secondary" type="submit">同步 JM 收藏到书架</button>
-  </form>
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;flex-wrap:wrap;">
+    <form method="post" action="/bookshelf/jm-login" style="margin:0;">
+      <input type="hidden" name="bp" value="{{ pager.page }}" />
+      <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <button class="btn ghost" type="submit">手动登录</button>
+    </form>
+    <form method="post" action="/bookshelf/jm-logout" style="margin:0;">
+      <input type="hidden" name="bp" value="{{ pager.page }}" />
+      <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <button class="btn ghost" type="submit"{% if not sync.manual_logged_in %} disabled{% endif %}>退出登录</button>
+    </form>
+    <form method="post" action="/bookshelf/sync-jm-favorites" style="margin:0;">
+      <input type="hidden" name="bp" value="{{ pager.page }}" />
+      <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <button class="btn secondary" type="submit">同步 JM 收藏到书架</button>
+    </form>
+  </div>
   {% else %}
-  <a class="btn ghost" href="/settings">去设置 JM 账号</a>
+  <div style="display:flex;justify-content:flex-end;">
+    <a class="btn ghost" href="/settings">去设置 JM 账号</a>
+  </div>
   {% endif %}
   {% else %}
-  <div class="subtle" style="margin-bottom:8px;color:#fecaca;">JM 功能不可用：{{ sync.jm_disabled_reason }}</div>
+  <div class="subtle" style="margin-bottom:8px;color:#b91c1c;">JM 功能不可用：{{ sync.jm_disabled_reason }}</div>
   {% endif %}
 </div>
 
@@ -28,32 +50,7 @@
   <h2 class="title">书架管理</h2>
   <div class="subtle" style="margin-bottom:8px;">
     共 {{ total_books }} 本漫画，已开启追更 {{ follow_count }} 本。
-    更新检查与增量下载请前往 <a class="btn ghost" style="padding:4px 10px;margin-left:6px;" href="/follow">追更页</a>
-  </div>
-
-  <div class="pager">
-    <form class="pager-form" method="get" action="/bookshelf">
-      <label style="margin:0;color:var(--muted);">每页</label>
-      <select class="select" style="width:96px;min-width:96px;" name="bps" onchange="this.form.submit()">
-        {% for opt in pager.page_size_options %}
-        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
-        {% endfor %}
-      </select>
-      <input type="hidden" name="bp" value="1" />
-    </form>
-    <div class="pager-links">
-      {% if pager.has_prev %}
-      <a class="btn ghost" href="{{ pager.prev_url }}">上一页</a>
-      {% else %}
-      <button class="btn ghost" type="button" disabled>上一页</button>
-      {% endif %}
-      <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
-      {% if pager.has_next %}
-      <a class="btn ghost" href="{{ pager.next_url }}">下一页</a>
-      {% else %}
-      <button class="btn ghost" type="button" disabled>下一页</button>
-      {% endif %}
-    </div>
+    更新检查与增量下载请前往 <a class="btn ghost" href="/follow">追更页</a>
   </div>
 
   <div class="bookshelf-grid">

@@ -376,6 +376,66 @@ async def sync_jm_favorites(
     return items
 
 
+async def manual_login_jm(
+    *,
+    output_dir: Path,
+    chapter_concurrency: int,
+    image_concurrency: int,
+    retries: int,
+    timeout: int,
+    jm_username: str,
+    jm_password: str,
+) -> str:
+    option = _build_jm_option(
+        output_dir=output_dir,
+        chapter_concurrency=chapter_concurrency,
+        image_concurrency=image_concurrency,
+        retries=retries,
+        timeout=timeout,
+    )
+    client = await asyncio.to_thread(option.new_jm_client)
+    await _login_jm_client(
+        client,
+        username=jm_username,
+        password=jm_password,
+        required=True,
+    )
+    try:
+        await asyncio.to_thread(client.favorite_folder, 1)
+    except Exception as exc:
+        raise RuntimeError(f"JM 登录校验失败：{exc}") from exc
+    return jm_username.strip()
+
+
+async def manual_logout_jm(
+    *,
+    output_dir: Path,
+    chapter_concurrency: int,
+    image_concurrency: int,
+    retries: int,
+    timeout: int,
+    jm_username: str,
+    jm_password: str,
+) -> None:
+    option = _build_jm_option(
+        output_dir=output_dir,
+        chapter_concurrency=chapter_concurrency,
+        image_concurrency=image_concurrency,
+        retries=retries,
+        timeout=timeout,
+    )
+    client = await asyncio.to_thread(option.new_jm_client)
+    await _login_jm_client(
+        client,
+        username=jm_username,
+        password=jm_password,
+        required=False,
+    )
+    logout = getattr(client, "logout", None)
+    if callable(logout):
+        await asyncio.to_thread(logout)
+
+
 class JMDownloadCancelled(BaseException):
     pass
 
@@ -554,6 +614,7 @@ class _JMProgressTracker:
                     number=state.number,
                     total_images=total,
                     saved_images=saved,
+                    downloaded_bytes=0,
                     status=status,
                     error=error_text or None,
                 )
@@ -646,13 +707,14 @@ class JMAsyncDownloader:
         self.jm_password = str(jm_password or "")
 
     def log(self, message: str) -> None:
-        try:
-            print(message)
-        except UnicodeEncodeError:
-            safe = message.encode("ascii", "backslashreplace").decode("ascii")
-            print(safe)
         if self.logger is not None:
             self.logger(message)
+            return
+        try:
+            print(message, flush=True)
+        except UnicodeEncodeError:
+            safe = message.encode("ascii", "backslashreplace").decode("ascii")
+            print(safe, flush=True)
 
     def emit_progress(self, **payload: Any) -> None:
         if self.progress_callback is None:

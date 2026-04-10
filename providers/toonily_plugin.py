@@ -64,6 +64,21 @@ class ToonilyProvider(SiteProvider):
             redis_username=state.redis_username,
             redis_password=state.redis_password,
             cache_ttl_seconds=state.cache_ttl_seconds,
+            manga_dir_template=state.manga_dir_template,
+            chapter_dir_template=state.chapter_dir_template,
+            page_name_template=state.page_name_template,
+            image_output_format=state.image_output_format,
+            image_quality=state.image_quality,
+            keep_original_images=state.keep_original_images,
+            auto_archive_format=state.auto_archive_format,
+            write_metadata_sidecar=state.write_metadata_sidecar,
+            enable_chapter_dedupe=state.enable_chapter_dedupe,
+            retry_base_delay_seconds=state.retry_base_delay_seconds,
+            retry_recoverable_only=state.retry_recoverable_only,
+            bandwidth_day_kbps=state.bandwidth_day_kbps,
+            bandwidth_night_kbps=state.bandwidth_night_kbps,
+            night_start_hour=state.night_start_hour,
+            night_end_hour=state.night_end_hour,
         )
 
 

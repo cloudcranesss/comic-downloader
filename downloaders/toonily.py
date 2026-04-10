@@ -1,9 +1,13 @@
 ﻿import argparse
 import asyncio
 import hashlib
+import io
+import json
 import mimetypes
 import os
 import re
+import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +22,11 @@ try:
     from redis.asyncio import Redis
 except Exception:
     Redis = None  # type: ignore[assignment]
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None  # type: ignore[assignment]
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -40,6 +49,7 @@ class ChapterResult:
     number: Optional[float]
     total_images: int
     saved_images: int
+    downloaded_bytes: int
     status: str
     error: Optional[str] = None
 
@@ -56,6 +66,10 @@ class DownloadReport:
     chapter_results: list[ChapterResult]
     started_at: datetime
     finished_at: datetime
+    downloaded_bytes: int = 0
+    archive_file: Optional[Path] = None
+    metadata_file: Optional[Path] = None
+    failure_reasons: Optional[dict[str, int]] = None
 
 
 def sanitize_name(name: str) -> str:
@@ -145,6 +159,34 @@ def parse_selector(selector: str, chapters: list[Chapter]) -> list[Chapter]:
     return [c for c in chapters if c.url in selected]
 
 
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def safe_format(template: str, mapping: dict[str, Any], fallback: str) -> str:
+    try:
+        return str(template).format_map(mapping)
+    except Exception:
+        return fallback
+
+
+def sanitize_path_parts(path_text: str) -> list[str]:
+    raw_parts = str(path_text).replace("\\", "/").split("/")
+    parts: list[str] = []
+    for part in raw_parts:
+        token = sanitize_name(part)
+        if token and token not in {".", ".."}:
+            parts.append(token)
+    return parts
+
+
 class ToonilyAsyncDownloader:
     def __init__(
         self,
@@ -170,6 +212,22 @@ class ToonilyAsyncDownloader:
         redis_password: Optional[str] = None,
         cache_ttl_seconds: int = 900,
         cache_prefix: str = "toonily:html:",
+        site_name: str = "toonily",
+        manga_dir_template: str = "{site}/{manga}",
+        chapter_dir_template: str = "{chapter_number}-{chapter_title}",
+        page_name_template: str = "{page:03}",
+        image_output_format: str = "original",
+        image_quality: int = 85,
+        keep_original_images: bool = False,
+        auto_archive_format: str = "none",
+        write_metadata_sidecar: bool = True,
+        enable_chapter_dedupe: bool = True,
+        retry_base_delay_seconds: float = 0.8,
+        retry_recoverable_only: bool = True,
+        bandwidth_day_kbps: int = 0,
+        bandwidth_night_kbps: int = 0,
+        night_start_hour: int = 22,
+        night_end_hour: int = 7,
     ) -> None:
         self.series_url = series_url.strip()
         self.output_dir = output_dir
@@ -204,9 +262,28 @@ class ToonilyAsyncDownloader:
         )
         self.cache_ttl_seconds = max(30, int(cache_ttl_seconds))
         self.cache_prefix = cache_prefix
+        self.site_name = sanitize_name(site_name or "toonily")
+        self.manga_dir_template = str(manga_dir_template or "{site}/{manga}")
+        self.chapter_dir_template = str(chapter_dir_template or "{chapter_number}-{chapter_title}")
+        self.page_name_template = str(page_name_template or "{page:03}")
+        fmt = str(image_output_format or "original").strip().lower()
+        self.image_output_format = fmt if fmt in {"original", "jpg", "webp"} else "original"
+        self.image_quality = max(1, min(100, int(image_quality)))
+        self.keep_original_images = bool(keep_original_images)
+        archive_fmt = str(auto_archive_format or "none").strip().lower()
+        self.auto_archive_format = archive_fmt if archive_fmt in {"none", "cbz", "zip"} else "none"
+        self.write_metadata_sidecar = bool(write_metadata_sidecar)
+        self.enable_chapter_dedupe = bool(enable_chapter_dedupe)
+        self.retry_base_delay_seconds = max(0.2, float(retry_base_delay_seconds))
+        self.retry_recoverable_only = bool(retry_recoverable_only)
+        self.bandwidth_day_kbps = max(0, int(bandwidth_day_kbps))
+        self.bandwidth_night_kbps = max(0, int(bandwidth_night_kbps))
+        self.night_start_hour = max(0, min(23, int(night_start_hour)))
+        self.night_end_hour = max(0, min(23, int(night_end_hour)))
 
         self._redis: Optional[Redis] = None  # type: ignore[valid-type]
         self._cache_disabled_reason = ""
+        self._download_index: dict[str, dict[str, Any]] = {}
 
         self.scraper = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "windows", "mobile": False}
@@ -217,13 +294,14 @@ class ToonilyAsyncDownloader:
         self.chapter_semaphore = asyncio.Semaphore(self.chapter_concurrency)
 
     def log(self, message: str) -> None:
-        try:
-            print(message)
-        except UnicodeEncodeError:
-            safe_message = message.encode("ascii", "backslashreplace").decode("ascii")
-            print(safe_message)
         if self.logger:
             self.logger(message)
+            return
+        try:
+            print(message, flush=True)
+        except UnicodeEncodeError:
+            safe_message = message.encode("ascii", "backslashreplace").decode("ascii")
+            print(safe_message, flush=True)
 
     def emit_progress(self, **payload: Any) -> None:
         if not self.progress_callback:
@@ -244,6 +322,194 @@ class ToonilyAsyncDownloader:
     async def ensure_not_cancelled(self) -> None:
         if self.is_cancelled():
             raise asyncio.CancelledError("Task cancelled by user.")
+
+    def _is_night_time(self) -> bool:
+        hour = datetime.now().hour
+        start = self.night_start_hour
+        end = self.night_end_hour
+        if start == end:
+            return False
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
+
+    def _bandwidth_limit_bps(self) -> int:
+        kbps = self.bandwidth_night_kbps if self._is_night_time() else self.bandwidth_day_kbps
+        return max(0, int(kbps * 1024))
+
+    async def _apply_bandwidth_limit(self, payload_size: int, elapsed_seconds: float) -> None:
+        limit_bps = self._bandwidth_limit_bps()
+        if limit_bps <= 0 or payload_size <= 0:
+            return
+        target_seconds = payload_size / float(limit_bps)
+        if target_seconds > elapsed_seconds:
+            await asyncio.sleep(target_seconds - elapsed_seconds)
+
+    def _is_recoverable_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        if "429" in text:
+            return True
+        if "timeout" in text:
+            return True
+        if "temporarily unavailable" in text:
+            return True
+        if "connection reset" in text or "connection aborted" in text:
+            return True
+        if isinstance(exc, asyncio.TimeoutError):
+            return True
+        if isinstance(exc, aiohttp.ClientError):
+            return True
+        return False
+
+    def _chapter_key(self, chapter_url: str) -> str:
+        return hashlib.sha1(normalize_url(chapter_url).encode("utf-8", errors="ignore")).hexdigest()
+
+    def _load_download_index(self, manga_dir: Path) -> None:
+        index_file = manga_dir / ".download_index.json"
+        self._download_index = {}
+        if not index_file.exists():
+            return
+        try:
+            data = json.loads(index_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._download_index = {
+                    str(k): dict(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, dict)
+                }
+        except Exception:
+            self._download_index = {}
+
+    def _save_download_index(self, manga_dir: Path) -> None:
+        index_file = manga_dir / ".download_index.json"
+        try:
+            index_file.write_text(
+                json.dumps(self._download_index, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _template_context(
+        self,
+        *,
+        manga_title: str,
+        chapter: Optional[Chapter] = None,
+        chapter_index: int = 0,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        chapter_title = chapter.title if chapter else ""
+        chapter_number = chapter.number
+        if chapter_number is None:
+            chapter_number_text = str(chapter_index + 1)
+        elif float(chapter_number).is_integer():
+            chapter_number_text = str(int(chapter_number))
+        else:
+            chapter_number_text = str(chapter_number)
+        return {
+            "site": self.site_name,
+            "manga": manga_title,
+            "chapter_title": chapter_title,
+            "chapter_number": chapter_number_text,
+            "chapter_index": chapter_index + 1,
+            "page": page,
+        }
+
+    def _build_manga_dir(self, manga_title: str) -> Path:
+        context = self._template_context(manga_title=manga_title)
+        rendered = safe_format(self.manga_dir_template, context, f"{self.site_name}/{manga_title}")
+        parts = sanitize_path_parts(rendered)
+        if not parts:
+            parts = [self.site_name, sanitize_name(manga_title)]
+        return self.output_dir.joinpath(*parts)
+
+    def _build_chapter_dir(self, manga_dir: Path, manga_title: str, chapter: Chapter, chapter_index: int) -> Path:
+        context = self._template_context(manga_title=manga_title, chapter=chapter, chapter_index=chapter_index)
+        rendered = safe_format(self.chapter_dir_template, context, chapter.title)
+        parts = sanitize_path_parts(rendered)
+        if not parts:
+            parts = [sanitize_name(chapter.title)]
+        return manga_dir.joinpath(*parts)
+
+    def _build_page_basename(self, chapter: Chapter, chapter_index: int, page: int) -> str:
+        context = self._template_context(manga_title="", chapter=chapter, chapter_index=chapter_index, page=page)
+        rendered = safe_format(self.page_name_template, context, f"{page:03}")
+        token = sanitize_name(rendered)
+        return token or f"{page:03}"
+
+    def _archive_manga_dir(self, manga_dir: Path) -> Optional[Path]:
+        if self.auto_archive_format == "none":
+            return None
+        try:
+            archive_base = manga_dir.parent / manga_dir.name
+            zip_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=str(manga_dir)))
+            if self.auto_archive_format == "zip":
+                return zip_path
+            cbz_path = zip_path.with_suffix(".cbz")
+            if cbz_path.exists():
+                cbz_path.unlink()
+            zip_path.rename(cbz_path)
+            return cbz_path
+        except Exception as exc:
+            self.log(f"[WARN] 归档失败：{exc}")
+            return None
+
+    def _failure_reason_counts(self, chapter_results: list[ChapterResult]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in chapter_results:
+            if item.status == "success":
+                continue
+            reason = (item.error or item.status or "unknown").strip()
+            if not reason:
+                reason = "unknown"
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
+
+    def _write_metadata_sidecar(
+        self,
+        manga_dir: Path,
+        *,
+        manga_title: str,
+        chapters: list[Chapter],
+        selected: list[Chapter],
+        chapter_results: list[ChapterResult],
+        archive_file: Optional[Path],
+    ) -> Optional[Path]:
+        if not self.write_metadata_sidecar:
+            return None
+
+        result_map = {normalize_url(item.url): item for item in chapter_results}
+        chapter_rows: list[dict[str, Any]] = []
+        for chapter in chapters:
+            key = normalize_url(chapter.url)
+            result = result_map.get(key)
+            chapter_rows.append(
+                {
+                    "title": chapter.title,
+                    "url": chapter.url,
+                    "number": chapter.number,
+                    "selected": any(normalize_url(s.url) == key for s in selected),
+                    "status": result.status if result else "skipped",
+                    "saved_images": result.saved_images if result else 0,
+                    "total_images": result.total_images if result else 0,
+                    "downloaded_bytes": result.downloaded_bytes if result else 0,
+                    "error": result.error if result else "",
+                }
+            )
+
+        payload = {
+            "title": manga_title,
+            "site": self.site_name,
+            "series_url": self.series_url,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "archive_file": str(archive_file) if archive_file else "",
+            "chapters": chapter_rows,
+        }
+        target = manga_dir / "metadata.json"
+        try:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return target
+        except Exception as exc:
+            self.log(f"[WARN] metadata 写入失败：{exc}")
+            return None
 
     def _cache_key(self, url: str) -> str:
         digest = hashlib.sha1(normalize_url(url).encode("utf-8", errors="ignore")).hexdigest()
@@ -339,10 +605,14 @@ class ToonilyAsyncDownloader:
                 raise
             except Exception as exc:
                 last_error = exc
-                if attempt < self.retries:
+                can_retry = self._is_recoverable_error(exc)
+                should_retry = can_retry or (not self.retry_recoverable_only)
+                if attempt < self.retries and should_retry:
                     await self.wait_if_paused()
                     await self.ensure_not_cancelled()
-                    await asyncio.sleep(1.2 * attempt)
+                    await asyncio.sleep(self.retry_base_delay_seconds * (2 ** (attempt - 1)))
+                else:
+                    break
         raise RuntimeError(f"Failed to fetch {url}: {last_error}")
 
     async def get_series_details(self) -> tuple[str, list[Chapter]]:
@@ -399,12 +669,17 @@ class ToonilyAsyncDownloader:
         image_url: str,
         target_file: Path,
         referer: str,
-    ) -> bool:
+        *,
+        source_ext: str,
+        output_ext: str,
+        keep_original_target: Optional[Path] = None,
+    ) -> tuple[bool, int, str]:
         async with self.image_semaphore:
             for attempt in range(1, self.retries + 1):
                 try:
                     await self.wait_if_paused()
                     await self.ensure_not_cancelled()
+                    started = time.perf_counter()
                     async with session.get(
                         image_url,
                         headers={"Referer": referer, "User-Agent": UA},
@@ -415,16 +690,42 @@ class ToonilyAsyncDownloader:
                         data = await response.read()
                         if not data:
                             raise RuntimeError("Empty image response")
-                        target_file.write_bytes(data)
-                        return True
+                        elapsed = max(0.0001, time.perf_counter() - started)
+                        await self._apply_bandwidth_limit(len(data), elapsed)
+
+                        final_data = data
+                        if self.image_output_format != "original" and output_ext != source_ext:
+                            if Image is None:
+                                raise RuntimeError("Pillow not installed for image conversion")
+                            with Image.open(io.BytesIO(data)) as img:
+                                if output_ext == ".jpg":
+                                    if img.mode in ("RGBA", "LA", "P"):
+                                        img = img.convert("RGB")
+                                    buf = io.BytesIO()
+                                    img.save(buf, format="JPEG", quality=self.image_quality, optimize=True)
+                                    final_data = buf.getvalue()
+                                elif output_ext == ".webp":
+                                    buf = io.BytesIO()
+                                    img.save(buf, format="WEBP", quality=self.image_quality, method=6)
+                                    final_data = buf.getvalue()
+
+                        target_file.write_bytes(final_data)
+                        if keep_original_target is not None and self.keep_original_images and keep_original_target != target_file:
+                            if not keep_original_target.exists():
+                                keep_original_target.write_bytes(data)
+                        return True, len(final_data), ""
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    if attempt < self.retries:
+                except Exception as exc:
+                    recoverable = self._is_recoverable_error(exc)
+                    should_retry = recoverable or (not self.retry_recoverable_only)
+                    if attempt < self.retries and should_retry:
                         await self.wait_if_paused()
                         await self.ensure_not_cancelled()
-                        await asyncio.sleep(0.8 * attempt)
-            return False
+                        await asyncio.sleep(self.retry_base_delay_seconds * (2 ** (attempt - 1)))
+                    else:
+                        return False, 0, str(exc)
+            return False, 0, "unknown"
 
     @staticmethod
     def _guess_extension(image_url: str, content_type: Optional[str] = None) -> str:
@@ -444,13 +745,14 @@ class ToonilyAsyncDownloader:
         self,
         session: aiohttp.ClientSession,
         manga_dir: Path,
+        manga_title: str,
         chapter: Chapter,
+        chapter_index: int,
     ) -> ChapterResult:
         async with self.chapter_semaphore:
             await self.wait_if_paused()
             await self.ensure_not_cancelled()
-            chapter_name = sanitize_name(chapter.title)
-            chapter_dir = manga_dir / chapter_name
+            chapter_dir = self._build_chapter_dir(manga_dir, manga_title, chapter, chapter_index)
             chapter_dir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -466,6 +768,7 @@ class ToonilyAsyncDownloader:
                     number=chapter.number,
                     total_images=0,
                     saved_images=0,
+                    downloaded_bytes=0,
                     status="failed",
                     error=str(exc),
                 )
@@ -479,47 +782,78 @@ class ToonilyAsyncDownloader:
                     number=chapter.number,
                     total_images=0,
                     saved_images=0,
+                    downloaded_bytes=0,
                     status="failed",
                     error="no images found",
                 )
 
             total = len(images)
-            width = max(3, len(str(total)))
-            tasks: list[asyncio.Task[bool]] = []
+            tasks: list[asyncio.Task[tuple[bool, int, str]]] = []
             skipped = 0
+            skipped_bytes = 0
 
             for index, image_url in enumerate(images, start=1):
                 await self.wait_if_paused()
                 await self.ensure_not_cancelled()
-                ext = self._guess_extension(image_url)
-                filename = f"{index:0{width}d}{ext}"
-                target_file = chapter_dir / filename
+                source_ext = self._guess_extension(image_url)
+                output_ext = source_ext if self.image_output_format == "original" else f".{self.image_output_format}"
+                page_name = self._build_page_basename(chapter, chapter_index, index)
+                target_file = chapter_dir / f"{page_name}{output_ext}"
+                original_file = None
+                if self.keep_original_images and self.image_output_format != "original":
+                    original_file = chapter_dir / f"{page_name}.orig{source_ext}"
 
                 if target_file.exists() and target_file.stat().st_size > 0:
                     skipped += 1
+                    skipped_bytes += target_file.stat().st_size
                     continue
 
                 tasks.append(
                     asyncio.create_task(
-                        self._download_one_image(session, image_url, target_file, chapter.url)
+                        self._download_one_image(
+                            session,
+                            image_url,
+                            target_file,
+                            chapter.url,
+                            source_ext=source_ext,
+                            output_ext=output_ext,
+                            keep_original_target=original_file,
+                        )
                     )
                 )
 
             downloaded = 0
+            downloaded_bytes = 0
+            failure_reasons: dict[str, int] = {}
             if tasks:
                 results = await asyncio.gather(*tasks)
-                downloaded = sum(1 for ok in results if ok)
+                for ok, size, reason in results:
+                    if ok:
+                        downloaded += 1
+                        downloaded_bytes += max(0, int(size))
+                    else:
+                        key = (reason or "download failed").strip()
+                        failure_reasons[key] = failure_reasons.get(key, 0) + 1
 
             saved = downloaded + skipped
+            total_bytes = downloaded_bytes + skipped_bytes
             if saved == total:
                 status = "success"
                 error = None
             elif saved > 0:
                 status = "partial"
-                error = f"saved {saved}/{total}"
+                if failure_reasons:
+                    top_reason = max(failure_reasons.items(), key=lambda x: x[1])[0]
+                    error = f"saved {saved}/{total}; {top_reason}"
+                else:
+                    error = f"saved {saved}/{total}"
             else:
                 status = "failed"
-                error = f"saved {saved}/{total}"
+                if failure_reasons:
+                    top_reason = max(failure_reasons.items(), key=lambda x: x[1])[0]
+                    error = f"saved {saved}/{total}; {top_reason}"
+                else:
+                    error = f"saved {saved}/{total}"
 
             prefix = "OK" if status == "success" else "WARN"
             self.log(
@@ -533,6 +867,7 @@ class ToonilyAsyncDownloader:
                 number=chapter.number,
                 total_images=total,
                 saved_images=saved,
+                downloaded_bytes=total_bytes,
                 status=status,
                 error=error,
             )
@@ -541,10 +876,12 @@ class ToonilyAsyncDownloader:
         self,
         session: aiohttp.ClientSession,
         manga_dir: Path,
+        manga_title: str,
         chapter: Chapter,
+        chapter_index: int,
     ) -> ChapterResult:
         try:
-            return await self.download_chapter(session, manga_dir, chapter)
+            return await self.download_chapter(session, manga_dir, manga_title, chapter, chapter_index)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -555,6 +892,7 @@ class ToonilyAsyncDownloader:
                 number=chapter.number,
                 total_images=0,
                 saved_images=0,
+                downloaded_bytes=0,
                 status="failed",
                 error=str(exc),
             )
@@ -603,19 +941,74 @@ class ToonilyAsyncDownloader:
         if not selected:
             raise RuntimeError("No chapters matched your selection.")
 
-        manga_dir = self.output_dir / manga_title
+        manga_dir = self._build_manga_dir(manga_title)
         manga_dir.mkdir(parents=True, exist_ok=True)
+        if self.enable_chapter_dedupe:
+            self._load_download_index(manga_dir)
 
         self.log(f"Manga: {manga_title}")
         self.log(f"Total chapters found: {len(chapters)}")
         self.log(f"Selected chapters: {len(selected)}")
         self.log(f"Output dir: {manga_dir}")
+
+        chapter_index_map = {normalize_url(ch.url): idx for idx, ch in enumerate(chapters)}
+        selected_pairs: list[tuple[int, Chapter]] = [
+            (chapter_index_map.get(normalize_url(ch.url), idx), ch)
+            for idx, ch in enumerate(selected)
+        ]
+
+        pre_done_results: list[ChapterResult] = []
+        pending_pairs: list[tuple[int, Chapter]] = []
+        if self.enable_chapter_dedupe:
+            for chapter_index, chapter in selected_pairs:
+                chapter_key = self._chapter_key(chapter.url)
+                index_row = self._download_index.get(chapter_key, {})
+                if str(index_row.get("status", "")).strip().lower() != "success":
+                    pending_pairs.append((chapter_index, chapter))
+                    continue
+
+                chapter_dir = self._build_chapter_dir(manga_dir, manga_title, chapter, chapter_index)
+                if not chapter_dir.exists():
+                    pending_pairs.append((chapter_index, chapter))
+                    continue
+
+                saved_files = [
+                    p for p in chapter_dir.iterdir()
+                    if p.is_file() and not p.name.startswith(".")
+                ]
+                if not saved_files:
+                    pending_pairs.append((chapter_index, chapter))
+                    continue
+
+                saved_images = len(saved_files)
+                pre_done_results.append(
+                    ChapterResult(
+                        title=chapter.title,
+                        url=chapter.url,
+                        number=chapter.number,
+                        total_images=saved_images,
+                        saved_images=saved_images,
+                        downloaded_bytes=0,
+                        status="success",
+                        error="dedupe skipped",
+                    )
+                )
+                self.log(f"[SKIP] {chapter.title}: already completed (dedupe)")
+        else:
+            pending_pairs = selected_pairs[:]
+
+        total_selected = len(selected_pairs)
+        done_chapters = len(pre_done_results)
+        total_images = sum(item.total_images for item in pre_done_results)
+        saved_images = sum(item.saved_images for item in pre_done_results)
+        downloaded_bytes = sum(item.downloaded_bytes for item in pre_done_results)
+
         self.emit_progress(
             event="init",
-            done_chapters=0,
-            total_chapters=len(selected),
-            saved_images=0,
-            total_images=0,
+            done_chapters=done_chapters,
+            total_chapters=total_selected,
+            saved_images=saved_images,
+            total_images=total_images,
         )
 
         cookies = {c.name: c.value for c in self.scraper.cookies}
@@ -624,14 +1017,13 @@ class ToonilyAsyncDownloader:
         connector = aiohttp.TCPConnector(limit=max(16, self.image_concurrency * 2), ssl=False)
         async with aiohttp.ClientSession(timeout=timeout, connector=connector, cookies=cookies) as session:
             tasks = [
-                asyncio.create_task(self._download_chapter_safe(session, manga_dir, chapter))
-                for chapter in selected
+                asyncio.create_task(
+                    self._download_chapter_safe(session, manga_dir, manga_title, chapter, chapter_index)
+                )
+                for chapter_index, chapter in pending_pairs
             ]
 
-            chapter_results: list[ChapterResult] = []
-            done_chapters = 0
-            total_images = 0
-            saved_images = 0
+            chapter_results: list[ChapterResult] = list(pre_done_results)
 
             try:
                 for task in asyncio.as_completed(tasks):
@@ -640,10 +1032,36 @@ class ToonilyAsyncDownloader:
                     done_chapters += 1
                     total_images += result.total_images
                     saved_images += result.saved_images
+                    downloaded_bytes += result.downloaded_bytes
+
+                    if self.enable_chapter_dedupe:
+                        chapter_idx = chapter_index_map.get(normalize_url(result.url), 0)
+                        chapter_key = self._chapter_key(result.url)
+                        chapter_title_hash = hashlib.sha1(
+                            f"{normalize_url(result.url)}|{result.title}".encode("utf-8", errors="ignore")
+                        ).hexdigest()
+                        chapter_dir = self._build_chapter_dir(
+                            manga_dir, manga_title, Chapter(result.title, result.url, result.number), chapter_idx
+                        )
+                        self._download_index[chapter_key] = {
+                            "chapter_url": normalize_url(result.url),
+                            "chapter_title": result.title,
+                            "chapter_title_hash": chapter_title_hash,
+                            "chapter_number": result.number,
+                            "chapter_index": chapter_idx + 1,
+                            "status": result.status,
+                            "total_images": result.total_images,
+                            "saved_images": result.saved_images,
+                            "downloaded_bytes": result.downloaded_bytes,
+                            "chapter_dir": str(chapter_dir),
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        self._save_download_index(manga_dir)
+
                     self.emit_progress(
                         event="chapter_done",
                         done_chapters=done_chapters,
-                        total_chapters=len(selected),
+                        total_chapters=total_selected,
                         saved_images=saved_images,
                         total_images=total_images,
                         last_chapter_title=result.title,
@@ -652,16 +1070,19 @@ class ToonilyAsyncDownloader:
             except asyncio.CancelledError:
                 for pending in tasks:
                     pending.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if self.enable_chapter_dedupe:
+                    self._save_download_index(manga_dir)
                 self.emit_progress(
                     event="cancelled",
                     done_chapters=done_chapters,
-                    total_chapters=len(selected),
+                    total_chapters=total_selected,
                     saved_images=saved_images,
                     total_images=total_images,
                 )
                 raise
 
-        order = {normalize_url(ch.url): idx for idx, ch in enumerate(selected)}
+        order = {normalize_url(ch.url): idx for idx, (_, ch) in enumerate(selected_pairs)}
         chapter_results.sort(key=lambda item: order.get(normalize_url(item.url), 10**9))
 
         failed = [r for r in chapter_results if r.status in {"failed", "partial"}]
@@ -671,15 +1092,29 @@ class ToonilyAsyncDownloader:
         if failed:
             retry_file = self._write_failed_retry_file(manga_dir, failed)
 
+        archive_file = self._archive_manga_dir(manga_dir)
+        metadata_file = self._write_metadata_sidecar(
+            manga_dir,
+            manga_title=manga_title,
+            chapters=chapters,
+            selected=selected,
+            chapter_results=chapter_results,
+            archive_file=archive_file,
+        )
+        failure_reasons = self._failure_reason_counts(chapter_results)
+        if self.enable_chapter_dedupe:
+            self._save_download_index(manga_dir)
+
         self.emit_progress(
             event="finished",
             done_chapters=len(chapter_results),
-            total_chapters=len(selected),
+            total_chapters=total_selected,
             saved_images=sum(item.saved_images for item in chapter_results),
             total_images=sum(item.total_images for item in chapter_results),
             successful_chapters=len(succeeded),
             failed_chapters=len(failed),
             retry_file=str(retry_file) if retry_file else "",
+            downloaded_bytes=downloaded_bytes,
         )
 
         self.log(
@@ -697,6 +1132,10 @@ class ToonilyAsyncDownloader:
             chapter_results=chapter_results,
             started_at=started_at,
             finished_at=datetime.now(),
+            downloaded_bytes=sum(item.downloaded_bytes for item in chapter_results),
+            archive_file=archive_file,
+            metadata_file=metadata_file,
+            failure_reasons=failure_reasons,
         )
 
 
@@ -790,6 +1229,94 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable Redis cache even if redis host is configured",
     )
+    parser.add_argument(
+        "--site-name",
+        default="toonily",
+        help="Site name for naming templates",
+    )
+    parser.add_argument(
+        "--manga-dir-template",
+        default="{site}/{manga}",
+        help="Manga dir template",
+    )
+    parser.add_argument(
+        "--chapter-dir-template",
+        default="{chapter_number}-{chapter_title}",
+        help="Chapter dir template",
+    )
+    parser.add_argument(
+        "--page-name-template",
+        default="{page:03}",
+        help="Page file name template (without extension)",
+    )
+    parser.add_argument(
+        "--image-output-format",
+        default="original",
+        choices=["original", "jpg", "webp"],
+        help="Output image format",
+    )
+    parser.add_argument(
+        "--image-quality",
+        type=int,
+        default=85,
+        help="Output image quality (1-100) for converted images",
+    )
+    parser.add_argument(
+        "--keep-original-images",
+        action="store_true",
+        help="Keep original image files when converting format",
+    )
+    parser.add_argument(
+        "--archive-format",
+        default="none",
+        choices=["none", "cbz", "zip"],
+        help="Archive output after download",
+    )
+    parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Disable metadata.json sidecar output",
+    )
+    parser.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="Disable chapter-level dedupe index",
+    )
+    parser.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=0.8,
+        help="Retry base delay in seconds (exponential backoff)",
+    )
+    parser.add_argument(
+        "--retry-all-errors",
+        action="store_true",
+        help="Retry all errors (default only retries recoverable errors like timeout/429)",
+    )
+    parser.add_argument(
+        "--bandwidth-day-kbps",
+        type=int,
+        default=0,
+        help="Daytime bandwidth limit KB/s (0 means unlimited)",
+    )
+    parser.add_argument(
+        "--bandwidth-night-kbps",
+        type=int,
+        default=0,
+        help="Night bandwidth limit KB/s (0 means unlimited)",
+    )
+    parser.add_argument(
+        "--night-start-hour",
+        type=int,
+        default=22,
+        help="Night start hour (0-23)",
+    )
+    parser.add_argument(
+        "--night-end-hour",
+        type=int,
+        default=7,
+        help="Night end hour (0-23)",
+    )
     return parser
 
 
@@ -821,6 +1348,22 @@ async def _main_async(args: argparse.Namespace) -> None:
         redis_username=args.redis_username,
         redis_password=args.redis_password,
         cache_ttl_seconds=args.cache_ttl,
+        site_name=args.site_name,
+        manga_dir_template=args.manga_dir_template,
+        chapter_dir_template=args.chapter_dir_template,
+        page_name_template=args.page_name_template,
+        image_output_format=args.image_output_format,
+        image_quality=args.image_quality,
+        keep_original_images=args.keep_original_images,
+        auto_archive_format=args.archive_format,
+        write_metadata_sidecar=not args.no_metadata,
+        enable_chapter_dedupe=not args.no_dedupe,
+        retry_base_delay_seconds=args.retry_base_delay,
+        retry_recoverable_only=not args.retry_all_errors,
+        bandwidth_day_kbps=args.bandwidth_day_kbps,
+        bandwidth_night_kbps=args.bandwidth_night_kbps,
+        night_start_hour=args.night_start_hour,
+        night_end_hour=args.night_end_hour,
     )
     try:
         report = await downloader.run()
@@ -839,3 +1382,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

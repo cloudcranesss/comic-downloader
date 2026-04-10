@@ -1,22 +1,24 @@
 ﻿
 import asyncio
+import csv
 import json
 import math
 import os
 import re
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
 from aiohttp import web
 from bs4 import BeautifulSoup
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from downloaders.jm import sync_jm_favorites
+from downloaders.jm import manual_login_jm, manual_logout_jm, sync_jm_favorites
 from downloaders.toonily import Chapter, DownloadReport, ToonilyAsyncDownloader, normalize_url
 from core.provider_base import SiteProvider
 from core.provider_loader import load_provider_plugins
@@ -33,7 +35,9 @@ LEGACY_BOOKSHELF_FILE = BASE_DIR / "bookshelf.json"
 LEGACY_SETTINGS_FILE = BASE_DIR / "webui_settings.json"
 TEMPLATES_DIR = BASE_DIR / "templates"
 DEFAULT_PROVIDER_ID = "toonily"
+AUTO_PROVIDER_ID = "__auto__"
 _TEMPLATE_ENV: Optional[Environment] = None
+FLASH_MSG_COOKIE = "comic_flash_msg"
 
 
 def ensure_data_dir_ready() -> None:
@@ -97,6 +101,17 @@ def parse_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, number))
 
 
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def format_chapter_number(num: Optional[float]) -> str:
     if num is None:
         return "-"
@@ -110,7 +125,7 @@ _PROVIDERS_LOADED = False
 
 
 def _provider_loader_log(message: str) -> None:
-    print(f"[provider-loader] {message}")
+    print(f"[provider-loader] {message}", flush=True)
 
 
 def _provider_context() -> dict[str, Any]:
@@ -223,6 +238,35 @@ class UIState:
         self.image_concurrency = 10
         self.retries = 3
         self.timeout = 45
+        self.max_parallel_jobs = 2
+        self.retry_base_delay_seconds = 0.8
+        self.retry_recoverable_only = True
+        self.enable_chapter_dedupe = True
+
+        self.image_output_format = "original"
+        self.image_quality = 85
+        self.keep_original_images = False
+        self.auto_archive_format = "none"
+        self.write_metadata_sidecar = True
+
+        self.manga_dir_template = "{site}/{manga}"
+        self.chapter_dir_template = "{chapter_number}-{chapter_title}"
+        self.page_name_template = "{page:03}"
+
+        self.bandwidth_day_kbps = 0
+        self.bandwidth_night_kbps = 0
+        self.night_start_hour = 22
+        self.night_end_hour = 7
+
+        self.scheduler_enabled = False
+        self.scheduler_interval_minutes = 60
+        self.scheduler_auto_download = True
+        self.scheduler_last_run_at = ""
+        self.scheduler_next_run_at = ""
+        self.scheduler_task: Optional[asyncio.Task[Any]] = None
+        self._scheduler_running = False
+
+        self.health_stats: dict[str, dict[str, Any]] = {}
 
         self.redis_host = os.getenv("REDIS_HOST", "").strip()
         self.redis_port = parse_int(os.getenv("REDIS_PORT", "6379"), 6379, minimum=1, maximum=65535)
@@ -237,6 +281,8 @@ class UIState:
         self.cache_ttl_seconds = 900
         self.jm_username = os.getenv("JM_USERNAME", "").strip()
         self.jm_password = os.getenv("JM_PASSWORD", "").strip()
+        self.jm_manual_logged_in = False
+        self.jm_manual_login_user = ""
         self.enabled_provider_ids: set[str] = set(PROVIDERS.keys()) or {DEFAULT_PROVIDER_ID}
 
         self.max_job_logs = 600
@@ -251,6 +297,29 @@ class UIState:
                 self.image_concurrency = max(1, int(raw.get("image_concurrency", self.image_concurrency)))
                 self.retries = max(1, int(raw.get("retries", self.retries)))
                 self.timeout = max(10, int(raw.get("timeout", self.timeout)))
+                self.max_parallel_jobs = parse_int(raw.get("max_parallel_jobs", self.max_parallel_jobs), self.max_parallel_jobs, minimum=1, maximum=20)
+                self.retry_base_delay_seconds = max(0.2, float(raw.get("retry_base_delay_seconds", self.retry_base_delay_seconds)))
+                self.retry_recoverable_only = parse_bool(raw.get("retry_recoverable_only", self.retry_recoverable_only), self.retry_recoverable_only)
+                self.enable_chapter_dedupe = parse_bool(raw.get("enable_chapter_dedupe", self.enable_chapter_dedupe), self.enable_chapter_dedupe)
+                image_fmt = str(raw.get("image_output_format", self.image_output_format)).strip().lower()
+                self.image_output_format = image_fmt if image_fmt in {"original", "jpg", "webp"} else "original"
+                self.image_quality = parse_int(raw.get("image_quality", self.image_quality), self.image_quality, minimum=1, maximum=100)
+                self.keep_original_images = parse_bool(raw.get("keep_original_images", self.keep_original_images), self.keep_original_images)
+                archive_fmt = str(raw.get("auto_archive_format", self.auto_archive_format)).strip().lower()
+                self.auto_archive_format = archive_fmt if archive_fmt in {"none", "cbz", "zip"} else "none"
+                self.write_metadata_sidecar = parse_bool(raw.get("write_metadata_sidecar", self.write_metadata_sidecar), self.write_metadata_sidecar)
+                self.manga_dir_template = str(raw.get("manga_dir_template", self.manga_dir_template) or self.manga_dir_template)
+                self.chapter_dir_template = str(raw.get("chapter_dir_template", self.chapter_dir_template) or self.chapter_dir_template)
+                self.page_name_template = str(raw.get("page_name_template", self.page_name_template) or self.page_name_template)
+                self.bandwidth_day_kbps = max(0, int(raw.get("bandwidth_day_kbps", self.bandwidth_day_kbps)))
+                self.bandwidth_night_kbps = max(0, int(raw.get("bandwidth_night_kbps", self.bandwidth_night_kbps)))
+                self.night_start_hour = parse_int(raw.get("night_start_hour", self.night_start_hour), self.night_start_hour, minimum=0, maximum=23)
+                self.night_end_hour = parse_int(raw.get("night_end_hour", self.night_end_hour), self.night_end_hour, minimum=0, maximum=23)
+                self.scheduler_enabled = parse_bool(raw.get("scheduler_enabled", self.scheduler_enabled), self.scheduler_enabled)
+                self.scheduler_interval_minutes = parse_int(raw.get("scheduler_interval_minutes", self.scheduler_interval_minutes), self.scheduler_interval_minutes, minimum=5, maximum=1440)
+                self.scheduler_auto_download = parse_bool(raw.get("scheduler_auto_download", self.scheduler_auto_download), self.scheduler_auto_download)
+                self.scheduler_last_run_at = str(raw.get("scheduler_last_run_at", self.scheduler_last_run_at) or "")
+                self.scheduler_next_run_at = str(raw.get("scheduler_next_run_at", self.scheduler_next_run_at) or "")
                 self.redis_host = str(raw.get("redis_host", self.redis_host)).strip()
                 self.redis_port = parse_int(raw.get("redis_port", self.redis_port), self.redis_port, minimum=1, maximum=65535)
                 self.redis_db = parse_int(raw.get("redis_db", self.redis_db), self.redis_db, minimum=0, maximum=999999)
@@ -305,6 +374,9 @@ class UIState:
             except Exception:
                 self.bookshelf = {}
 
+        if self.scheduler_enabled and not self.scheduler_next_run_at:
+            self.schedule_next_run(immediate=False)
+
     async def save_settings(self) -> None:
         payload = {
             "output_dir": str(self.output_dir),
@@ -312,6 +384,27 @@ class UIState:
             "image_concurrency": self.image_concurrency,
             "retries": self.retries,
             "timeout": self.timeout,
+            "max_parallel_jobs": self.max_parallel_jobs,
+            "retry_base_delay_seconds": self.retry_base_delay_seconds,
+            "retry_recoverable_only": self.retry_recoverable_only,
+            "enable_chapter_dedupe": self.enable_chapter_dedupe,
+            "image_output_format": self.image_output_format,
+            "image_quality": self.image_quality,
+            "keep_original_images": self.keep_original_images,
+            "auto_archive_format": self.auto_archive_format,
+            "write_metadata_sidecar": self.write_metadata_sidecar,
+            "manga_dir_template": self.manga_dir_template,
+            "chapter_dir_template": self.chapter_dir_template,
+            "page_name_template": self.page_name_template,
+            "bandwidth_day_kbps": self.bandwidth_day_kbps,
+            "bandwidth_night_kbps": self.bandwidth_night_kbps,
+            "night_start_hour": self.night_start_hour,
+            "night_end_hour": self.night_end_hour,
+            "scheduler_enabled": self.scheduler_enabled,
+            "scheduler_interval_minutes": self.scheduler_interval_minutes,
+            "scheduler_auto_download": self.scheduler_auto_download,
+            "scheduler_last_run_at": self.scheduler_last_run_at,
+            "scheduler_next_run_at": self.scheduler_next_run_at,
             "redis_host": self.redis_host,
             "redis_port": self.redis_port,
             "redis_db": self.redis_db,
@@ -350,6 +443,80 @@ class UIState:
     def set_enabled_providers(self, provider_ids: set[str]) -> None:
         self.enabled_provider_ids = {str(pid).strip().lower() for pid in provider_ids if str(pid).strip()}
         self.normalize_enabled_providers()
+
+    def ensure_health_entry(self, provider_id: str) -> dict[str, Any]:
+        pid = (provider_id or DEFAULT_PROVIDER_ID).strip().lower() or DEFAULT_PROVIDER_ID
+        row = self.health_stats.get(pid)
+        if row is not None:
+            return row
+        row = {
+            "provider_id": pid,
+            "provider_name": provider_name(pid),
+            "available": True,
+            "last_check_at": "",
+            "last_error": "",
+            "total_jobs": 0,
+            "success_jobs": 0,
+            "failed_jobs": 0,
+            "total_downloaded_bytes": 0,
+            "total_download_seconds": 0.0,
+            "avg_speed_kbps": 0.0,
+            "failure_reasons": {},
+        }
+        self.health_stats[pid] = row
+        return row
+
+    def mark_provider_health(self, provider_id: str, *, available: bool, error: str = "") -> None:
+        row = self.ensure_health_entry(provider_id)
+        row["available"] = bool(available)
+        row["last_check_at"] = now_iso()
+        row["last_error"] = str(error or "").strip()
+
+    def record_download_report(self, provider_id: str, report: Optional[DownloadReport], status: str, error: str = "") -> None:
+        row = self.ensure_health_entry(provider_id)
+        row["provider_name"] = provider_name(provider_id)
+        row["last_check_at"] = now_iso()
+        row["total_jobs"] = int(row.get("total_jobs", 0)) + 1
+        if status == "completed":
+            row["success_jobs"] = int(row.get("success_jobs", 0)) + 1
+            row["available"] = True
+            row["last_error"] = ""
+        elif status == "cancelled":
+            row["last_error"] = str(error or "").strip()
+        else:
+            row["failed_jobs"] = int(row.get("failed_jobs", 0)) + 1
+            row["available"] = False
+            row["last_error"] = str(error or row.get("last_error") or "").strip()
+
+        if report is not None:
+            downloaded_bytes = max(0, int(report.downloaded_bytes or 0))
+            elapsed_seconds = max(
+                0.0,
+                (report.finished_at - report.started_at).total_seconds(),
+            )
+            row["total_downloaded_bytes"] = int(row.get("total_downloaded_bytes", 0)) + downloaded_bytes
+            row["total_download_seconds"] = float(row.get("total_download_seconds", 0.0)) + elapsed_seconds
+            total_seconds = float(row.get("total_download_seconds", 0.0))
+            total_bytes = int(row.get("total_downloaded_bytes", 0))
+            if total_seconds > 0:
+                row["avg_speed_kbps"] = round((total_bytes / total_seconds) / 1024, 2)
+            failure_reasons = dict(row.get("failure_reasons") or {})
+            for reason, count in (report.failure_reasons or {}).items():
+                key = str(reason or "unknown").strip() or "unknown"
+                failure_reasons[key] = int(failure_reasons.get(key, 0)) + int(count)
+            row["failure_reasons"] = failure_reasons
+        elif error and status != "cancelled":
+            failure_reasons = dict(row.get("failure_reasons") or {})
+            key = str(error).strip() or "unknown"
+            failure_reasons[key] = int(failure_reasons.get(key, 0)) + 1
+            row["failure_reasons"] = failure_reasons
+
+    def schedule_next_run(self, *, immediate: bool = False) -> None:
+        if immediate:
+            next_dt = datetime.now()
+        else:
+            next_dt = datetime.now() + timedelta(minutes=max(5, int(self.scheduler_interval_minutes)))
+        self.scheduler_next_run_at = next_dt.isoformat(timespec="seconds")
 
     async def save_bookshelf(self) -> None:
         items = list(self.bookshelf.values())
@@ -433,6 +600,12 @@ class UIState:
         logs.append(line)
         if len(logs) > self.max_job_logs:
             del logs[0 : len(logs) - self.max_job_logs]
+        try:
+            job_id = str(job.get("id") or "-")
+            print(f"[job:{job_id}] {line}", flush=True)
+        except Exception:
+            # Console logging must never affect in-memory job logging.
+            pass
 
     def create_job(
         self,
@@ -491,8 +664,70 @@ def is_job_final(status: str) -> bool:
     return status in {"completed", "failed", "cancelled"}
 
 
+def parse_iso_datetime(value: str) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
 def get_app_state(request: web.Request) -> UIState:
     return request.app["state"]
+
+
+def pop_flash_message(request: web.Request) -> str:
+    msg = str(request.get("flash_msg", "") or "").strip()
+    if msg:
+        return msg
+    # Backward compatibility for old links with ?msg=...
+    return str(request.query.get("msg", "") or "").strip()
+
+
+@web.middleware
+async def flash_message_middleware(request: web.Request, handler: Callable[..., Any]) -> web.StreamResponse:
+    raw_cookie = str(request.cookies.get(FLASH_MSG_COOKIE, "") or "")
+    if raw_cookie:
+        try:
+            request["flash_msg"] = unquote(raw_cookie).strip()
+        except Exception:
+            request["flash_msg"] = raw_cookie.strip()
+
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        response = exc
+        if raw_cookie:
+            response.del_cookie(FLASH_MSG_COOKIE, path="/")
+        raise
+
+    if raw_cookie:
+        response.del_cookie(FLASH_MSG_COOKIE, path="/")
+    return response
+
+
+def count_active_jobs(state: UIState) -> int:
+    total = 0
+    for job in state.jobs.values():
+        if job.get("status") in {"running", "paused", "cancelling"}:
+            total += 1
+    return total
+
+
+def dispatch_jobs(state: UIState) -> None:
+    active = count_active_jobs(state)
+    if active >= state.max_parallel_jobs:
+        return
+
+    queued_jobs = [job for job in state.jobs.values() if job.get("status") == "queued" and job.get("task") is None]
+    queued_jobs.sort(key=lambda row: str(row.get("created_at", "")))
+    for job in queued_jobs:
+        if active >= state.max_parallel_jobs:
+            break
+        start_job(state, job)
+        active += 1
 
 
 def redis_cache_enabled_for_state(state: UIState) -> bool:
@@ -521,11 +756,103 @@ async def fetch_html_with_downloader(
         redis_username=state.redis_username,
         redis_password=state.redis_password,
         cache_ttl_seconds=state.cache_ttl_seconds,
+        retry_base_delay_seconds=state.retry_base_delay_seconds,
+        retry_recoverable_only=state.retry_recoverable_only,
     )
     try:
         return await downloader.fetch_html(url)
     finally:
         await downloader.close()
+
+
+def normalize_http_url(url: str, *, base_url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        text = f"https:{text}"
+    elif text.startswith("/"):
+        text = urljoin(base_url, text)
+    if text.startswith(("http://", "https://")):
+        return text
+    return ""
+
+
+def best_src_from_srcset(srcset: str) -> str:
+    best_url = ""
+    best_score = -1.0
+    for raw in str(srcset or "").split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        parts = item.split()
+        if not parts:
+            continue
+        candidate = parts[0].strip()
+        score = 0.0
+        if len(parts) > 1:
+            desc = parts[1].strip().lower()
+            match_w = re.match(r"^(\d+(?:\.\d+)?)w$", desc)
+            match_x = re.match(r"^(\d+(?:\.\d+)?)x$", desc)
+            if match_w:
+                score = float(match_w.group(1))
+            elif match_x:
+                score = float(match_x.group(1)) * 1000.0
+        if score >= best_score:
+            best_score = score
+            best_url = candidate
+    return best_url
+
+
+def extract_img_url(img: Any, *, base_url: str) -> str:
+    if img is None:
+        return ""
+    srcset = str(img.get("data-srcset") or img.get("srcset") or "").strip()
+    if srcset:
+        url = normalize_http_url(best_src_from_srcset(srcset), base_url=base_url)
+        if url:
+            return url
+    raw = (
+        img.get("data-src")
+        or img.get("data-lazy-src")
+        or img.get("data-original")
+        or img.get("src")
+        or ""
+    )
+    return normalize_http_url(str(raw).strip(), base_url=base_url)
+
+
+def parse_toonily_cover_from_html(html: str, *, base_url: str = "https://toonily.com") -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    selectors = [
+        ".summary_image img.img-responsive",
+        ".summary_image img",
+        ".profile-manga img.img-responsive",
+        ".profile-manga img",
+        "img.img-responsive",
+    ]
+    for selector in selectors:
+        img = soup.select_one(selector)
+        cover_url = extract_img_url(img, base_url=base_url)
+        if cover_url:
+            return cover_url
+
+    og = soup.select_one("meta[property='og:image'], meta[name='og:image']")
+    if og is not None:
+        cover_url = normalize_http_url(str(og.get("content") or "").strip(), base_url=base_url)
+        if cover_url:
+            return cover_url
+    return ""
+
+
+async def fetch_toonily_cover_url(
+    state: UIState,
+    series_url: str,
+    *,
+    logger: Optional[callable] = None,
+) -> str:
+    html = await fetch_html_with_downloader(state, series_url, logger=logger)
+    return parse_toonily_cover_from_html(html, base_url=series_url or "https://toonily.com")
 
 
 def parse_search_results(html: str) -> list[dict[str, Any]]:
@@ -570,19 +897,7 @@ def parse_search_results(html: str) -> list[dict[str, Any]]:
                 if chapter_link is not None:
                     latest = " ".join(chapter_link.get_text(" ", strip=True).split())
                 img = container.select_one("img")
-                if img is not None:
-                    cover = (
-                        img.get("data-src")
-                        or img.get("data-lazy-src")
-                        or img.get("src")
-                        or ""
-                    ).strip()
-                    if cover.startswith("//"):
-                        cover = f"https:{cover}"
-                    elif cover.startswith("/"):
-                        cover = urljoin("https://toonily.com", cover)
-                    if cover and not cover.startswith(("http://", "https://")):
-                        cover = ""
+                cover = extract_img_url(img, base_url="https://toonily.com")
 
             results.append(
                 {
@@ -657,12 +972,17 @@ async def search_toonily(state: UIState, keyword: str) -> list[dict[str, Any]]:
                         hinted_title = snapshot_title
                 except Exception:
                     pass
+                hinted_cover = ""
+                try:
+                    hinted_cover = await fetch_toonily_cover_url(state, hinted_series_url)
+                except Exception:
+                    hinted_cover = ""
                 merged.append(
                     {
                         "title": hinted_title,
                         "url": hinted_series_url,
                         "latest": "",
-                        "cover": "",
+                        "cover": hinted_cover,
                     }
                 )
                 seen.add(hinted_series_url)
@@ -670,12 +990,18 @@ async def search_toonily(state: UIState, keyword: str) -> list[dict[str, Any]]:
             break
 
     if not merged and keyword.startswith(("http://", "https://")) and "/serie/" in keyword:
+        hinted_url = normalize_url(keyword)
+        hinted_cover = ""
+        try:
+            hinted_cover = await fetch_toonily_cover_url(state, hinted_url)
+        except Exception:
+            hinted_cover = ""
         merged.append(
             {
                 "title": keyword.rstrip("/").split("/")[-1].replace("-", " "),
-                "url": normalize_url(keyword),
+                "url": hinted_url,
                 "latest": "",
-                "cover": "",
+                "cover": hinted_cover,
             }
         )
 
@@ -704,6 +1030,8 @@ async def fetch_series_snapshot_toonily(
         redis_username=state.redis_username,
         redis_password=state.redis_password,
         cache_ttl_seconds=state.cache_ttl_seconds,
+        retry_base_delay_seconds=state.retry_base_delay_seconds,
+        retry_recoverable_only=state.retry_recoverable_only,
     )
     try:
         return await downloader.get_series_details()
@@ -782,6 +1110,14 @@ async def refresh_book_snapshot(
     set_site_latest_fields(book, chapters)
     pending = compute_pending_chapters(book, chapters)
     book["pending_update_count"] = len(pending)
+    if provider_id == "toonily" and not str(book.get("cover") or "").strip():
+        try:
+            cover = await fetch_toonily_cover_url(state, book["series_url"], logger=logger)
+            if cover:
+                book["cover"] = cover
+        except Exception as exc:
+            if logger:
+                logger(f"[WARN] 获取封面失败：{exc}")
     book["last_checked_at"] = now_iso()
     return pending
 
@@ -800,6 +1136,8 @@ def pick_latest_report_chapter(report: DownloadReport) -> tuple[Optional[str], O
 
 
 def build_redirect(path: str, **params: Any) -> web.HTTPSeeOther:
+    raw_msg = params.pop("msg", None)
+    msg = str(raw_msg).strip() if raw_msg is not None else ""
     query: dict[str, str] = {}
     for key, value in params.items():
         if value is None:
@@ -810,7 +1148,204 @@ def build_redirect(path: str, **params: Any) -> web.HTTPSeeOther:
     location = path
     if query:
         location = f"{path}?{urlencode(query)}"
-    return web.HTTPSeeOther(location=location)
+    response = web.HTTPSeeOther(location=location)
+    if msg:
+        response.set_cookie(
+            FLASH_MSG_COOKIE,
+            quote(msg, safe=""),
+            max_age=180,
+            path="/",
+            samesite="Lax",
+        )
+    return response
+
+
+def extract_urls_from_text(text: str) -> list[str]:
+    found = re.findall(r"https?://[^\s\"'<>]+", text or "", flags=re.IGNORECASE)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in found:
+        url = normalize_url(item)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def parse_bulk_import_payload(raw_text: str, filename: str = "") -> list[str]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+
+    lower_name = str(filename or "").strip().lower()
+    urls: list[str] = []
+
+    if lower_name.endswith(".json") or text.startswith("[") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+            candidates: list[Any] = []
+            if isinstance(data, list):
+                candidates = data
+            elif isinstance(data, dict):
+                for key in ("items", "books", "urls", "data"):
+                    val = data.get(key)
+                    if isinstance(val, list):
+                        candidates.extend(val)
+                if not candidates:
+                    candidates = [data]
+            for row in candidates:
+                if isinstance(row, str):
+                    urls.extend(extract_urls_from_text(row))
+                elif isinstance(row, dict):
+                    for key in ("url", "series_url", "link", "href"):
+                        val = row.get(key)
+                        if val:
+                            urls.extend(extract_urls_from_text(str(val)))
+            if urls:
+                return list(dict.fromkeys(urls))
+        except Exception:
+            pass
+
+    if lower_name.endswith(".csv"):
+        reader = csv.reader(StringIO(text))
+        for row in reader:
+            for cell in row:
+                urls.extend(extract_urls_from_text(str(cell)))
+        if urls:
+            return list(dict.fromkeys(urls))
+
+    urls = extract_urls_from_text(text)
+    if urls:
+        return urls
+
+    urls = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        token = line.strip()
+        if not token:
+            continue
+        if token.startswith(("http://", "https://")):
+            url = normalize_url(token)
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def guess_title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    tail = parsed.path.strip("/").split("/")[-1] if parsed.path else ""
+    tail = tail.replace("-", " ").replace("_", " ").strip()
+    return tail or parsed.netloc or "未命名漫画"
+
+
+def detect_provider_id_by_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip().lower()
+    if not host:
+        return ""
+
+    if "toonily" in host:
+        return "toonily"
+
+    jm_host_tokens = (
+        "18comic",
+        "jmcomic",
+        "jm365",
+        "comic18",
+    )
+    if any(token in host for token in jm_host_tokens):
+        return "jmcomic"
+    if path.startswith("/album/") or path.startswith("/photo/"):
+        return "jmcomic"
+
+    return ""
+
+
+def first_enabled_provider_id(state: UIState) -> str:
+    for provider in list_providers():
+        if provider_enabled_for_state(state, provider):
+            return provider.provider_id
+    return DEFAULT_PROVIDER_ID
+
+
+def has_active_job_for_book(state: UIState, book_id: str) -> bool:
+    if not book_id:
+        return False
+    for job in state.jobs.values():
+        if str(job.get("book_id") or "") != book_id:
+            continue
+        if job.get("status") in {"queued", "running", "paused", "cancelling"}:
+            return True
+    return False
+
+
+async def run_scheduler_cycle(state: UIState) -> tuple[int, int]:
+    scanned = 0
+    enqueued = 0
+    books = [book for book in state.list_books() if bool(book.get("follow_enabled", True))]
+    for book in books:
+        provider_id = str(book.get("provider_id") or DEFAULT_PROVIDER_ID)
+        provider = get_provider(provider_id)
+        reason = provider_disabled_reason(state, provider)
+        if reason:
+            state.mark_provider_health(provider.provider_id, available=False, error=reason)
+            continue
+        scanned += 1
+        try:
+            pending = await refresh_book_snapshot(state, book)
+            state.mark_provider_health(provider.provider_id, available=True)
+            if state.scheduler_auto_download and pending and not has_active_job_for_book(state, str(book.get("id") or "")):
+                chapter_urls = [item.url for item in pending]
+                job = state.create_job(
+                    title=f"计划任务更新：{book['title']} ({len(chapter_urls)} 章)",
+                    series_url=book["series_url"],
+                    chapter_selector="all",
+                    chapter_urls=chapter_urls,
+                    mode="scheduled_updates",
+                    book_id=str(book.get("id") or ""),
+                    provider_id=provider.provider_id,
+                )
+                state.append_job_log(job, "由计划任务自动创建。")
+                enqueued += 1
+        except Exception as exc:
+            state.mark_provider_health(provider.provider_id, available=False, error=str(exc))
+    await state.save_bookshelf()
+    dispatch_jobs(state)
+    return scanned, enqueued
+
+
+async def scheduler_loop(app: web.Application) -> None:
+    state: UIState = app["state"]
+    while True:
+        try:
+            await asyncio.sleep(5)
+            if not state.scheduler_enabled:
+                continue
+            if state._scheduler_running:
+                continue
+            next_run_at = parse_iso_datetime(state.scheduler_next_run_at)
+            now = datetime.now()
+            if next_run_at is not None and now < next_run_at:
+                continue
+
+            state._scheduler_running = True
+            scanned, enqueued = await run_scheduler_cycle(state)
+            state.scheduler_last_run_at = now_iso()
+            state.schedule_next_run(immediate=False)
+            await state.save_settings()
+            print(f"[SCHEDULER] scanned={scanned}, enqueued={enqueued}, next={state.scheduler_next_run_at}", flush=True)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            print(f"[SCHEDULER] cycle failed: {exc}", flush=True)
+        finally:
+            state._scheduler_running = False
 
 def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -> str:
     nav_items = [
@@ -818,6 +1353,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         ("progress", "进度", "/progress"),
         ("bookshelf", "书架", "/bookshelf"),
         ("follow", "追更", "/follow"),
+        ("health", "监控", "/health"),
         ("settings", "设置", "/settings"),
     ]
     nav_html_parts = []
@@ -825,6 +1361,44 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         cls = "nav-link active" if key == active_nav else "nav-link"
         nav_html_parts.append(f'<a class="{cls}" href="{href}">{escape(label)}</a>')
     nav_html = "\n".join(nav_html_parts)
+    theme_bootstrap_script = (
+        "<script>"
+        "(function(){"
+        "try{"
+        "var key='comic-ui-theme';"
+        "var saved=localStorage.getItem(key);"
+        "var prefersDark=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;"
+        "var theme=(saved==='dark'||saved==='light')?saved:(prefersDark?'dark':'light');"
+        "document.documentElement.setAttribute('data-theme',theme);"
+        "}catch(_){document.documentElement.setAttribute('data-theme','light');}"
+        "})();"
+        "</script>"
+    )
+    theme_toggle_script = (
+        "<script>"
+        "(function(){"
+        "var key='comic-ui-theme';"
+        "var btn=document.getElementById('theme-toggle');"
+        "if(!btn){return;}"
+        "var root=document.documentElement;"
+        "function applyTheme(theme){"
+        "root.setAttribute('data-theme',theme);"
+        "btn.textContent=theme==='dark'?'主题：深色':'主题：浅色';"
+        "btn.setAttribute('aria-label',theme==='dark'?'当前深色主题，点击切换浅色':'当前浅色主题，点击切换深色');"
+        "}"
+        "var saved='';"
+        "try{saved=localStorage.getItem(key)||'';}catch(_){saved='';}"
+        "var prefersDark=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;"
+        "var current=(saved==='dark'||saved==='light')?saved:(prefersDark?'dark':'light');"
+        "applyTheme(current);"
+        "btn.addEventListener('click',function(){"
+        "current=root.getAttribute('data-theme')==='dark'?'light':'dark';"
+        "applyTheme(current);"
+        "try{localStorage.setItem(key,current);}catch(_){ }"
+        "});"
+        "})();"
+        "</script>"
+    )
 
     return (
         "<!doctype html>\n"
@@ -835,106 +1409,123 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         f"  <title>{escape(title)}</title>\n"
         "  <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n"
         "  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n"
-        "  <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap\" rel=\"stylesheet\">\n"
+        "  <link href=\"https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&display=swap\" rel=\"stylesheet\">\n"
+        f"  {theme_bootstrap_script}\n"
         "  <style>\n"
         "    :root {\n"
-        "      --primary: #6366f1;\n"
-        "      --primary-light: #818cf8;\n"
-        "      --primary-glow: #8b5cf6;\n"
-        "      --secondary: #ec4899;\n"
-        "      --accent: #22d3ee;\n"
+        "      --primary: #0f6fff;\n"
+        "      --primary-light: #287df8;\n"
+        "      --secondary: #0ea5a0;\n"
+        "      --accent: #0ea5a0;\n"
         "      --warning: #f59e0b;\n"
-        "      --danger: #fb7185;\n"
-        "      --text: #f8fafc;\n"
-        "      --muted: #9aa7bd;\n"
-        "      --bg-dark: #0f172a;\n"
-        "      --bg-darker: #020617;\n"
-        "      --panel: rgba(15, 23, 42, 0.6);\n"
-        "      --panel-border: rgba(255, 255, 255, 0.1);\n"
-        "      --glass: rgba(255, 255, 255, 0.04);\n"
-        "      --glass-hover: rgba(255, 255, 255, 0.08);\n"
-        "      --shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);\n"
+        "      --danger: #dc2626;\n"
+        "      --text: #1f2937;\n"
+        "      --muted: #667085;\n"
+        "      --bg-dark: #f6f7fb;\n"
+        "      --bg-darker: #eef2f8;\n"
+        "      --panel: #ffffff;\n"
+        "      --panel-border: #dfe4ee;\n"
+        "      --glass: #f5f8ff;\n"
+        "      --glass-hover: #edf2ff;\n"
+        "      --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);\n"
         "    }\n"
         "    * { box-sizing: border-box; }\n"
         "    body {\n"
         "      margin: 0;\n"
         "      color: var(--text);\n"
-        "      font-family: 'Inter', 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;\n"
-        "      background: var(--bg-darker);\n"
+        "      font-family: 'Manrope', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;\n"
+        "      background: radial-gradient(1200px 520px at 8% -10%, #e7efff 0%, transparent 60%), radial-gradient(1000px 460px at 95% -12%, #d8fbf6 0%, transparent 62%), linear-gradient(180deg, var(--bg-dark) 0%, #f9fbff 100%);\n"
         "      min-height: 100vh;\n"
         "      overflow-x: hidden;\n"
         "    }\n"
-        "    .bg-effects { position: fixed; inset: 0; z-index: -2; overflow: hidden; }\n"
-        "    .blob { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.34; animation: float 24s ease-in-out infinite; }\n"
-        "    .blob.one { width: 520px; height: 520px; background: linear-gradient(135deg, var(--primary), var(--primary-glow)); top: -180px; left: -120px; }\n"
-        "    .blob.two { width: 460px; height: 460px; background: linear-gradient(135deg, var(--secondary), #f472b6); right: -120px; bottom: -100px; animation-delay: -8s; }\n"
-        "    .blob.three { width: 360px; height: 360px; background: linear-gradient(135deg, var(--accent), #06b6d4); left: 45%; top: 42%; opacity: 0.24; animation-delay: -4s; }\n"
-        "    .grid-pattern { position: fixed; inset: 0; z-index: -1; background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 56px 56px; }\n"
+        "    .bg-effects { display: none; }\n"
+        "    .grid-pattern { display: none; }\n"
         "    @keyframes float {\n"
         "      0%,100% { transform: translate(0,0) scale(1); }\n"
         "      25% { transform: translate(36px, -42px) scale(1.05); }\n"
         "      50% { transform: translate(-24px, 34px) scale(0.95); }\n"
         "      75% { transform: translate(18px, 44px) scale(1.02); }\n"
         "    }\n"
-        "    .shell { width: min(1240px, calc(100% - 28px)); margin: 20px auto 32px; }\n"
+        "    .shell { width: min(1320px, calc(100% - 24px)); margin: 14px auto 30px; }\n"
         "    .top {\n"
         "      display: flex;\n"
         "      align-items: center;\n"
         "      justify-content: space-between;\n"
-        "      gap: 14px;\n"
+        "      gap: 12px;\n"
         "      margin-bottom: 14px;\n"
         "      position: sticky;\n"
-        "      top: 12px;\n"
+        "      top: 10px;\n"
         "      z-index: 20;\n"
-        "      background: rgba(2, 6, 23, 0.65);\n"
-        "      border: 1px solid rgba(255,255,255,0.08);\n"
-        "      border-radius: 18px;\n"
-        "      backdrop-filter: blur(16px);\n"
+        "      background: rgba(255,255,255,0.92);\n"
+        "      border: 1px solid var(--panel-border);\n"
+        "      border-radius: 16px;\n"
+        "      backdrop-filter: blur(8px);\n"
+        "      box-shadow: var(--shadow);\n"
         "      padding: 12px 14px;\n"
         "    }\n"
-        "    .logo { font-size: 36px; font-weight: 800; letter-spacing: 0.6px; background: linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.72) 55%, var(--primary-light) 100%); -webkit-background-clip: text; color: transparent; }\n"
-        "    .nav { display: flex; gap: 10px; flex-wrap: wrap; }\n"
+        "    .logo { font-size: 28px; font-weight: 900; letter-spacing: 0.4px; color: #0b1324; font-family: 'Noto Sans SC', sans-serif; }\n"
+        "    .top-actions {\n"
+        "      display: flex;\n"
+        "      align-items: center;\n"
+        "      justify-content: flex-end;\n"
+        "      gap: 8px;\n"
+        "      flex-wrap: wrap;\n"
+        "      margin: 0;\n"
+        "    }\n"
+        "    .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0; padding: 0; }\n"
         "    .nav-link {\n"
         "      text-decoration: none;\n"
-        "      color: var(--muted);\n"
-        "      padding: 10px 16px;\n"
-        "      border-radius: 14px;\n"
+        "      color: #334155;\n"
+        "      font-size: 14px;\n"
+        "      padding: 9px 12px;\n"
+        "      border-radius: 11px;\n"
         "      border: 1px solid transparent;\n"
-        "      transition: 0.25s ease;\n"
-        "      background: var(--glass);\n"
-        "      font-weight: 600;\n"
-        "    }\n"
-        "    .nav-link:hover { color: #fff; border-color: rgba(255,255,255,0.24); background: var(--glass-hover); transform: translateY(-1px); }\n"
-        "    .nav-link.active {\n"
-        "      color: #030712;\n"
+        "      transition: all 0.15s ease;\n"
+        "      background: transparent;\n"
         "      font-weight: 700;\n"
-        "      background: linear-gradient(135deg, var(--primary-light), var(--secondary));\n"
-        "      border-color: rgba(255,255,255,0.34);\n"
-        "      box-shadow: 0 10px 24px -10px rgba(99,102,241,0.65);\n"
+        "    }\n"
+        "    .nav-link:hover { color: #0b1324; border-color: #d8e2f4; background: #f1f5ff; transform: translateY(-1px); }\n"
+        "    .nav-link.active {\n"
+        "      color: #fff;\n"
+        "      font-weight: 800;\n"
+        "      background: linear-gradient(135deg, var(--primary), var(--primary-light));\n"
+        "      border-color: var(--primary);\n"
+        "      box-shadow: 0 8px 18px rgba(15, 111, 255, 0.35);\n"
+        "    }\n"
+        "    .theme-toggle {\n"
+        "      min-width: 100px;\n"
+        "      justify-content: center;\n"
+        "      font-weight: 700;\n"
+        "      min-height: 36px;\n"
+        "      padding: 8px 12px;\n"
+        "      line-height: 1.2;\n"
+        "      align-self: center;\n"
+        "      position: relative;\n"
+        "      top: -1px;\n"
+        "      margin: 0;\n"
         "    }\n"
         "    .panel {\n"
         "      background: var(--panel);\n"
         "      border: 1px solid var(--panel-border);\n"
-        "      border-radius: 18px;\n"
+        "      border-radius: 16px;\n"
         "      box-shadow: var(--shadow);\n"
-        "      backdrop-filter: blur(14px);\n"
-        "      padding: 18px;\n"
-        "      margin-bottom: 16px;\n"
+        "      padding: 16px;\n"
+        "      margin-bottom: 14px;\n"
         "    }\n"
-        "    .title { margin: 0 0 10px; font-size: 20px; font-weight: 800; }\n"
-        "    .subtle { color: var(--muted); font-size: 14px; line-height: 1.45; }\n"
+        "    .title { margin: 0 0 10px; font-size: 20px; font-weight: 900; letter-spacing: 0.2px; }\n"
+        "    .subtle { color: var(--muted); font-size: 13px; line-height: 1.5; }\n"
         "    .msg {\n"
         "      position: fixed;\n"
-        "      top: 16px;\n"
+        "      top: 12px;\n"
         "      left: 50%;\n"
         "      transform: translate(-50%, -10px);\n"
         "      z-index: 9999;\n"
         "      width: min(760px, calc(100% - 20px));\n"
         "      border-radius: 12px;\n"
-        "      background: rgba(34, 211, 238, 0.16);\n"
-        "      border: 1px solid rgba(34, 211, 238, 0.38);\n"
-        "      box-shadow: 0 12px 28px rgba(2, 6, 23, 0.36);\n"
-        "      color: #d1fae5;\n"
+        "      background: #f0f6ff;\n"
+        "      border: 1px solid #b4d0ff;\n"
+        "      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);\n"
+        "      color: #0b3f9a;\n"
         "      padding: 10px 12px;\n"
         "      font-size: 14px;\n"
         "      display: flex;\n"
@@ -961,7 +1552,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .msg-close {\n"
         "      border: 0;\n"
         "      background: transparent;\n"
-        "      color: #d1fae5;\n"
+        "      color: #0b3f9a;\n"
         "      font-size: 18px;\n"
         "      line-height: 1;\n"
         "      cursor: pointer;\n"
@@ -969,62 +1560,68 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      opacity: 0.85;\n"
         "    }\n"
         "    .msg-close:hover { opacity: 1; }\n"
-        "    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }\n"
+        "    .split-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }\n"
+        "    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }\n"
         "    .result-grid {\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(auto-fill, minmax(180px, 220px));\n"
+        "      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));\n"
         "      gap: 12px;\n"
-        "      justify-content: start;\n"
         "      align-items: stretch;\n"
         "    }\n"
-        "    .search-form { display: flex; gap: 10px; flex-wrap: wrap; }\n"
+        "    .search-form { display: grid; grid-template-columns: minmax(220px, 1fr) 220px 140px auto; gap: 10px; align-items: end; }\n"
         "    .input,\n"
         "    .select {\n"
-        "      background: rgba(15,23,42,0.55);\n"
+        "      background: #fff;\n"
         "      color: var(--text);\n"
-        "      border: 1px solid rgba(255,255,255,0.16);\n"
-        "      border-radius: 12px;\n"
-        "      padding: 10px 12px;\n"
-        "      min-height: 42px;\n"
+        "      border: 1px solid #d6deec;\n"
+        "      border-radius: 11px;\n"
+        "      padding: 9px 11px;\n"
+        "      min-height: 40px;\n"
         "      width: 100%;\n"
-        "      transition: border-color 0.2s ease, box-shadow 0.2s ease;\n"
+        "      transition: border-color 0.15s ease, box-shadow 0.15s ease;\n"
         "    }\n"
         "    .input:focus,\n"
-        "    .select:focus { outline: none; border-color: rgba(99,102,241,0.6); box-shadow: 0 0 0 3px rgba(99,102,241,0.18); }\n"
-        "    .input::placeholder { color: #86a1b9; }\n"
+        "    .select:focus { outline: none; border-color: #8ab3ff; box-shadow: 0 0 0 3px rgba(15, 111, 255, 0.14); }\n"
+        "    .input::placeholder { color: #94a3b8; }\n"
         "    .btn {\n"
-        "      border: 0;\n"
-        "      border-radius: 12px;\n"
-        "      padding: 10px 14px;\n"
+        "      border: 1px solid var(--primary);\n"
+        "      border-radius: 11px;\n"
+        "      padding: 9px 12px;\n"
+        "      min-height: 38px;\n"
         "      cursor: pointer;\n"
-        "      color: #020617;\n"
-        "      font-weight: 700;\n"
-        "      background: linear-gradient(135deg, var(--primary-light), var(--secondary));\n"
-        "      box-shadow: 0 10px 26px -12px rgba(139,92,246,0.78);\n"
-        "      transition: transform 0.16s ease, filter 0.2s ease, box-shadow 0.2s ease;\n"
+        "      color: #fff;\n"
+        "      font-weight: 800;\n"
+        "      font-size: 13px;\n"
+        "      background: linear-gradient(135deg, var(--primary), var(--primary-light));\n"
+        "      transition: all 0.16s ease;\n"
+        "      text-decoration: none;\n"
+        "      display: inline-flex;\n"
+        "      align-items: center;\n"
+        "      justify-content: center;\n"
+        "      white-space: nowrap;\n"
         "    }\n"
-        "    .btn:hover { transform: translateY(-2px); filter: brightness(1.05); box-shadow: 0 16px 30px -14px rgba(139,92,246,0.8); }\n"
+        "    .btn:hover { transform: translateY(-1px); filter: brightness(1.02); box-shadow: 0 8px 16px rgba(15, 111, 255, 0.26); }\n"
         "    .btn.secondary {\n"
-        "      background: linear-gradient(135deg, var(--accent), #22c55e);\n"
-        "      box-shadow: 0 10px 26px -12px rgba(34,211,238,0.72);\n"
+        "      border-color: #0e8f8a;\n"
+        "      background: linear-gradient(135deg, #0ea5a0, #139c8e);\n"
         "    }\n"
         "    .btn.ghost {\n"
-        "      color: var(--text);\n"
-        "      border: 1px solid rgba(255,255,255,0.22);\n"
-        "      background: rgba(255,255,255,0.05);\n"
+        "      color: #334155;\n"
+        "      border: 1px solid #c8d4ea;\n"
+        "      background: #fff;\n"
         "      box-shadow: none;\n"
         "    }\n"
-        "    .btn.warn { background: linear-gradient(135deg, #ef4444, #fb7185); color: #fff; }\n"
+        "    .btn.warn { border-color: var(--danger); background: linear-gradient(135deg, var(--danger), #ef4444); color: #fff; }\n"
         "    .btn[disabled] { opacity: 0.52; cursor: not-allowed; transform: none; }\n"
         "    .result-card {\n"
-        "      border-radius: 16px;\n"
-        "      border: 1px solid rgba(255,255,255,0.11);\n"
-        "      background: rgba(15,23,42,0.55);\n"
-        "      padding: 12px;\n"
+        "      border-radius: 14px;\n"
+        "      border: 1px solid #dbe3f0;\n"
+        "      background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);\n"
+        "      padding: 10px;\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
         "      gap: 8px;\n"
-        "      min-height: 180px;\n"
+        "      min-height: 430px;\n"
         "      height: 100%;\n"
         "    }\n"
         "    .result-cover-wrap {\n"
@@ -1032,8 +1629,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      aspect-ratio: 3 / 4;\n"
         "      border-radius: 10px;\n"
         "      overflow: hidden;\n"
-        "      background: linear-gradient(145deg, rgba(148,163,184,0.16), rgba(148,163,184,0.06));\n"
-        "      border: 1px solid rgba(255,255,255,0.13);\n"
+        "      background: #edf1f8;\n"
+        "      border: 1px solid #dce4f2;\n"
         "      display: flex;\n"
         "      align-items: center;\n"
         "      justify-content: center;\n"
@@ -1045,21 +1642,21 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      display: block;\n"
         "    }\n"
         "    .result-cover-empty {\n"
-        "      color: var(--muted);\n"
-        "      font-size: 13px;\n"
-        "      letter-spacing: 0.4px;\n"
+        "      color: #94a3b8;\n"
+        "      font-size: 12px;\n"
+        "      letter-spacing: 0.2px;\n"
         "    }\n"
         "    .result-title {\n"
-        "      font-size: 16px;\n"
-        "      font-weight: 700;\n"
+        "      font-size: 15px;\n"
+        "      font-weight: 800;\n"
         "      line-height: 1.35;\n"
-        "      min-height: calc(1.35em * 4);\n"
+        "      min-height: calc(1.35em * 3);\n"
         "      display: -webkit-box;\n"
-        "      -webkit-line-clamp: 4;\n"
+        "      -webkit-line-clamp: 3;\n"
         "      -webkit-box-orient: vertical;\n"
         "      overflow: hidden;\n"
         "    }\n"
-        "    .link { color: #93c5fd; text-decoration: none; }\n"
+        "    .link { color: #0f6fff; text-decoration: none; font-size: 12px; }\n"
         "    .result-link {\n"
         "      word-break: break-all;\n"
         "      line-height: 1.35;\n"
@@ -1076,38 +1673,39 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      min-height: 1.4em;\n"
         "    }\n"
         "    .link:hover { text-decoration: underline; }\n"
-        "    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }\n"
-        "    .actions form { margin: 0; }\n"
+        "    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: auto; }\n"
+        "    .actions form { margin: 0; min-width: 0; }\n"
+        "    .actions .btn { width: 100%; }\n"
         "    .job-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; color: var(--muted); }\n"
         "    .badge {\n"
         "      display: inline-block;\n"
         "      padding: 3px 10px;\n"
         "      border-radius: 999px;\n"
-        "      border: 1px solid rgba(255,255,255,0.2);\n"
+        "      border: 1px solid #cad6ef;\n"
         "      font-size: 12px;\n"
-        "      color: #dbeafe;\n"
-        "      background: rgba(99,102,241,0.24);\n"
+        "      color: #1555c0;\n"
+        "      background: #edf4ff;\n"
         "    }\n"
         "    .progress {\n"
         "      width: 100%;\n"
         "      height: 10px;\n"
         "      border-radius: 999px;\n"
-        "      background: rgba(255,255,255,0.1);\n"
+        "      background: #e6edf8;\n"
         "      overflow: hidden;\n"
         "      margin: 6px 0 12px;\n"
         "    }\n"
         "    .bar {\n"
         "      height: 100%;\n"
         "      width: 0%;\n"
-        "      background: linear-gradient(90deg, var(--primary-light), var(--accent));\n"
+        "      background: linear-gradient(90deg, var(--primary), var(--accent));\n"
         "      transition: width 0.3s ease;\n"
         "    }\n"
         "    .log-box {\n"
         "      height: 260px;\n"
         "      border-radius: 12px;\n"
-        "      border: 1px solid rgba(255,255,255,0.14);\n"
-        "      background: rgba(1, 7, 16, 0.7);\n"
-        "      color: #d4e4f7;\n"
+        "      border: 1px solid #dce4f2;\n"
+        "      background: #f7f9fd;\n"
+        "      color: #1f2937;\n"
         "      padding: 10px;\n"
         "      overflow: auto;\n"
         "      font-family: Consolas, \"Courier New\", monospace;\n"
@@ -1117,28 +1715,28 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    }\n"
         "    .book-card {\n"
         "      padding: 10px;\n"
-        "      border: 1px solid rgba(255,255,255,0.12);\n"
+        "      border: 1px solid #dbe3f0;\n"
         "      border-radius: 14px;\n"
-        "      background: rgba(15,23,42,0.55);\n"
+        "      background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
         "      gap: 8px;\n"
         "      height: 100%;\n"
+        "      min-height: 430px;\n"
         "    }\n"
         "    .bookshelf-grid {\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(auto-fill, minmax(220px, 260px));\n"
+        "      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));\n"
         "      gap: 12px;\n"
-        "      justify-content: start;\n"
         "      align-items: stretch;\n"
         "    }\n"
         "    .book-card .result-cover-wrap {\n"
-        "      width: min(122px, 100%);\n"
-        "      margin: 0 auto 8px;\n"
+        "      width: 100%;\n"
+        "      margin: 0 0 8px;\n"
         "    }\n"
         "    .book-title {\n"
         "      margin: 0;\n"
-        "      font-size: 16px;\n"
+        "      font-size: 15px;\n"
         "      line-height: 1.35;\n"
         "      min-height: calc(1.35em * 3);\n"
         "      display: -webkit-box;\n"
@@ -1149,13 +1747,13 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .book-meta-list { display: flex; flex-direction: column; gap: 4px; }\n"
         "    .book-meta { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.4; }\n"
         "    .book-meta.clamp-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
-        "    .book-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }\n"
-        "    .book-actions form { margin: 0; }\n"
-        "    .book-actions .btn { padding: 7px 10px; min-height: 34px; font-size: 12px; }\n"
+        "    .book-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: auto; }\n"
+        "    .book-actions form { margin: 0; min-width: 0; }\n"
+        "    .book-actions .btn { padding: 8px 10px; min-height: 36px; font-size: 12px; width: 100%; }\n"
         "    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }\n"
         "    .stat-card {\n"
-        "      border: 1px solid rgba(255,255,255,0.14);\n"
-        "      background: rgba(255,255,255,0.04);\n"
+        "      border: 1px solid #dbe3f0;\n"
+        "      background: #fff;\n"
         "      border-radius: 12px;\n"
         "      padding: 10px;\n"
         "    }\n"
@@ -1163,15 +1761,15 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .stat-value { font-size: 18px; font-weight: 800; }\n"
         "    .settings-grid {\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n"
-        "      gap: 12px;\n"
+        "      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));\n"
+        "      gap: 10px;\n"
         "    }\n"
         "    .settings-section {\n"
-        "      border: 1px solid rgba(255,255,255,0.14);\n"
+        "      border: 1px solid #dbe3f0;\n"
         "      border-radius: 12px;\n"
         "      padding: 12px;\n"
         "      margin-bottom: 12px;\n"
-        "      background: rgba(255,255,255,0.03);\n"
+        "      background: #f8fafc;\n"
         "    }\n"
         "    .settings-title {\n"
         "      margin: 0 0 8px;\n"
@@ -1186,12 +1784,12 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      line-height: 1;\n"
         "      padding: 4px 8px;\n"
         "      border-radius: 999px;\n"
-        "      border: 1px solid rgba(255,255,255,0.2);\n"
-        "      background: rgba(255,255,255,0.08);\n"
-        "      color: #dbeafe;\n"
+        "      border: 1px solid #d5deee;\n"
+        "      background: #f7faff;\n"
+        "      color: #1e3a8a;\n"
         "    }\n"
-        "    .site-badge.toonily { color: #fcd34d; border-color: rgba(245, 158, 11, 0.56); }\n"
-        "    .site-badge.jmcomic { color: #67e8f9; border-color: rgba(34, 211, 238, 0.56); }\n"
+        "    .site-badge.toonily { color: #a16207; border-color: #f3ddb0; background: #fff7e7; }\n"
+        "    .site-badge.jmcomic { color: #0f766e; border-color: #b5eee6; background: #ecfdf9; }\n"
         "    .site-icon { width: 14px; height: 14px; display: inline-block; }\n"
         "    .pager {\n"
         "      display: flex;\n"
@@ -1211,33 +1809,124 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    }\n"
         "    .pager-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }\n"
         "    label { display: block; font-size: 13px; margin-bottom: 5px; color: #c5d7ea; }\n"
+        "    html[data-theme='dark'] {\n"
+        "      color-scheme: dark;\n"
+        "      --text: #e3ebf7;\n"
+        "      --muted: #9cb0cc;\n"
+        "      --bg-dark: #0b1220;\n"
+        "      --bg-darker: #0f1a2d;\n"
+        "      --panel: #101a2d;\n"
+        "      --panel-border: #24364f;\n"
+        "      --shadow: 0 12px 28px rgba(0, 0, 0, 0.35);\n"
+        "      --primary: #4e9dff;\n"
+        "      --primary-light: #3f87df;\n"
+        "      --secondary: #13b9a4;\n"
+        "      --accent: #13b9a4;\n"
+        "    }\n"
+        "    html[data-theme='dark'] body {\n"
+        "      background: radial-gradient(1200px 520px at 8% -10%, #1a2a45 0%, transparent 60%), radial-gradient(1000px 460px at 95% -12%, #10343a 0%, transparent 62%), linear-gradient(180deg, #0b1220 0%, #0f1a2d 100%);\n"
+        "    }\n"
+        "    html[data-theme='dark'] .top {\n"
+        "      background: rgba(16, 26, 45, 0.92);\n"
+        "      border-color: #2a3d59;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .logo { color: #f0f5ff; }\n"
+        "    html[data-theme='dark'] .nav-link {\n"
+        "      color: #c0cee3;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .nav-link:hover {\n"
+        "      color: #f0f5ff;\n"
+        "      border-color: #324865;\n"
+        "      background: #18263d;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .input,\n"
+        "    html[data-theme='dark'] .select {\n"
+        "      background: #0f1a2b;\n"
+        "      color: #e3ebf7;\n"
+        "      border-color: #304463;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .input::placeholder { color: #7f92ad; }\n"
+        "    html[data-theme='dark'] .btn.ghost {\n"
+        "      color: #d1deef;\n"
+        "      border-color: #39506e;\n"
+        "      background: #142239;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .result-card,\n"
+        "    html[data-theme='dark'] .book-card {\n"
+        "      border-color: #2a3f5e;\n"
+        "      background: linear-gradient(180deg, #111e32 0%, #0f1a2d 100%);\n"
+        "    }\n"
+        "    html[data-theme='dark'] .result-cover-wrap {\n"
+        "      background: #17263d;\n"
+        "      border-color: #314969;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .result-cover-empty { color: #90a3c0; }\n"
+        "    html[data-theme='dark'] .badge {\n"
+        "      border-color: #334b6b;\n"
+        "      color: #a9cbff;\n"
+        "      background: #152841;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .progress { background: #1b2c45; }\n"
+        "    html[data-theme='dark'] .log-box {\n"
+        "      border-color: #314969;\n"
+        "      background: #0d1727;\n"
+        "      color: #d6e1f2;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .stat-card {\n"
+        "      border-color: #2a3f5e;\n"
+        "      background: #101c2f;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .settings-section {\n"
+        "      border-color: #304463;\n"
+        "      background: #0f1a2d;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .site-badge {\n"
+        "      border-color: #324866;\n"
+        "      background: #14233a;\n"
+        "      color: #b6cef0;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .site-badge.toonily {\n"
+        "      color: #f8d17e;\n"
+        "      border-color: #7a6431;\n"
+        "      background: #2f2816;\n"
+        "    }\n"
+        "    html[data-theme='dark'] .site-badge.jmcomic {\n"
+        "      color: #6ee0cc;\n"
+        "      border-color: #2f6e67;\n"
+        "      background: #112a29;\n"
+        "    }\n"
+        "    @media (max-width: 980px) {\n"
+        "      .split-grid { grid-template-columns: 1fr; }\n"
+        "      .search-form { grid-template-columns: 1fr 1fr; }\n"
+        "    }\n"
         "    @media (max-width: 780px) {\n"
-        "      .shell { width: calc(100% - 16px); margin-top: 12px; }\n"
+        "      .shell { width: calc(100% - 14px); margin-top: 10px; }\n"
         "      .top { flex-direction: column; align-items: flex-start; }\n"
-        "      .logo { font-size: 32px; }\n"
-        "      .search-form { flex-direction: column; }\n"
-        "      .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }\n"
-        "      .bookshelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }\n"
-        "      .result-card { max-width: none; }\n"
-        "      .book-card .result-cover-wrap { width: min(100px, 100%); }\n"
+        "      .top-actions { width: 100%; justify-content: space-between; }\n"
+        "      .logo { font-size: 24px; }\n"
+        "      .search-form { grid-template-columns: 1fr; }\n"
+        "      .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }\n"
+        "      .bookshelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }\n"
+        "      .result-card,\n"
+        "      .book-card { min-height: 390px; }\n"
+        "      .actions,\n"
+        "      .book-actions { grid-template-columns: 1fr; }\n"
         "      .settings-grid { grid-template-columns: 1fr; }\n"
         "    }\n"
         "  </style>\n"
         "</head>\n"
         "<body>\n"
-        "  <div class=\"bg-effects\">"
-        "    <div class=\"blob one\"></div>"
-        "    <div class=\"blob two\"></div>"
-        "    <div class=\"blob three\"></div>"
-        "  </div>"
-        "  <div class=\"grid-pattern\"></div>\n"
         "  <div class=\"shell\">\n"
         "    <div class=\"top\">\n"
         "      <div class=\"logo\">漫画下载</div>\n"
-        f"      <nav class=\"nav\">{nav_html}</nav>\n"
+        "      <div class=\"top-actions\">\n"
+        f"        <nav class=\"nav\">{nav_html}</nav>\n"
+        "        <button class=\"btn ghost theme-toggle\" id=\"theme-toggle\" type=\"button\">主题</button>\n"
+        "      </div>\n"
         "    </div>\n"
         f"    {body}\n"
         "  </div>\n"
+        f"{theme_toggle_script}\n"
         f"{script}\n"
         "</body>\n"
         "</html>\n"
@@ -1527,6 +2216,20 @@ def render_dashboard(
                 "selected": provider.provider_id == state.last_search_provider,
             }
         )
+    import_provider_options = [
+        {
+            "value": AUTO_PROVIDER_ID,
+            "label": "自动识别站点（推荐）",
+            "selected": True,
+        }
+    ] + [
+        {
+            "value": item["value"],
+            "label": f"{item['label']}（固定）",
+            "selected": False,
+        }
+        for item in provider_options
+    ]
 
     search_page_size_options = [
         {"value": size, "selected": size == max(4, min(40, int(search_page_size)))}
@@ -1537,6 +2240,7 @@ def render_dashboard(
         message_html=render_message(msg),
         search_query=state.last_search_query,
         provider_options=provider_options,
+        import_provider_options=import_provider_options,
         search_page_size_options=search_page_size_options,
         results=results,
         job_html=job_html,
@@ -1643,6 +2347,8 @@ def render_bookshelf(
             "jm_enabled": jm_enabled_for_use,
             "has_jm_login": has_jm_login,
             "jm_username": state.jm_username,
+            "manual_logged_in": state.jm_manual_logged_in,
+            "manual_login_user": state.jm_manual_login_user,
             "jm_disabled_reason": jm_reason or "未知原因",
         },
         total_books=total_books,
@@ -1708,6 +2414,43 @@ def render_follow(
     return render_layout(title="漫画下载 - 追更", active_nav="follow", body=body)
 
 
+def render_health(state: UIState, msg: str) -> str:
+    rows: list[dict[str, Any]] = []
+    for provider in list_providers():
+        row = state.ensure_health_entry(provider.provider_id)
+        reasons = dict(row.get("failure_reasons") or {})
+        top_reasons = sorted(reasons.items(), key=lambda item: item[1], reverse=True)[:6]
+        rows.append(
+            {
+                "provider_id": provider.provider_id,
+                "provider_name": provider.display_name,
+                "available": bool(row.get("available", provider.enabled)),
+                "last_check_at": fmt_time(str(row.get("last_check_at", ""))),
+                "last_error": str(row.get("last_error", "")),
+                "avg_speed_kbps": float(row.get("avg_speed_kbps", 0.0)),
+                "total_jobs": int(row.get("total_jobs", 0)),
+                "success_jobs": int(row.get("success_jobs", 0)),
+                "failed_jobs": int(row.get("failed_jobs", 0)),
+                "failure_reasons": top_reasons,
+            }
+        )
+
+    body = render_template(
+        "health.html",
+        message_html=render_message(msg),
+        scheduler={
+            "enabled": state.scheduler_enabled,
+            "interval_minutes": state.scheduler_interval_minutes,
+            "auto_download": state.scheduler_auto_download,
+            "last_run_at": fmt_time(state.scheduler_last_run_at),
+            "next_run_at": fmt_time(state.scheduler_next_run_at),
+            "running": state._scheduler_running,
+        },
+        rows=rows,
+    )
+    return render_layout(title="漫画下载 - 监控", active_nav="health", body=body)
+
+
 def render_settings(state: UIState, msg: str) -> str:
     jm_provider = get_provider("jmcomic")
     provider_switches: list[dict[str, Any]] = []
@@ -1732,6 +2475,27 @@ def render_settings(state: UIState, msg: str) -> str:
             "image_concurrency": state.image_concurrency,
             "retries": state.retries,
             "timeout": state.timeout,
+            "max_parallel_jobs": state.max_parallel_jobs,
+            "retry_base_delay_seconds": state.retry_base_delay_seconds,
+            "retry_recoverable_only": state.retry_recoverable_only,
+            "enable_chapter_dedupe": state.enable_chapter_dedupe,
+            "image_output_format": state.image_output_format,
+            "image_quality": state.image_quality,
+            "keep_original_images": state.keep_original_images,
+            "auto_archive_format": state.auto_archive_format,
+            "write_metadata_sidecar": state.write_metadata_sidecar,
+            "manga_dir_template": state.manga_dir_template,
+            "chapter_dir_template": state.chapter_dir_template,
+            "page_name_template": state.page_name_template,
+            "bandwidth_day_kbps": state.bandwidth_day_kbps,
+            "bandwidth_night_kbps": state.bandwidth_night_kbps,
+            "night_start_hour": state.night_start_hour,
+            "night_end_hour": state.night_end_hour,
+            "scheduler_enabled": state.scheduler_enabled,
+            "scheduler_interval_minutes": state.scheduler_interval_minutes,
+            "scheduler_auto_download": state.scheduler_auto_download,
+            "scheduler_last_run_at": fmt_time(state.scheduler_last_run_at),
+            "scheduler_next_run_at": fmt_time(state.scheduler_next_run_at),
             "redis_host": state.redis_host,
             "redis_port": state.redis_port,
             "redis_db": state.redis_db,
@@ -1796,6 +2560,7 @@ async def run_download_job(state: UIState, job: dict[str, Any]) -> None:
         job["finished_at"] = now_iso()
         job["error"] = reason
         state.append_job_log(job, f"任务失败：{job['error']}")
+        state.record_download_report(provider.provider_id, None, "failed", reason)
         return
 
     async def pause_waiter() -> None:
@@ -1821,36 +2586,40 @@ async def run_download_job(state: UIState, job: dict[str, Any]) -> None:
             job["failed_chapters"] = int(payload.get("failed_chapters", 0))
             job["retry_file"] = str(payload.get("retry_file", "")).strip()
 
-    downloader = provider.create_downloader(
-        state,
-        series_url=job["series_url"],
-        chapter_selector=job["chapter_selector"],
-        chapter_urls=job["chapter_urls"],
-        logger=logger,
-        progress_callback=progress_callback,
-        pause_waiter=pause_waiter,
-        cancel_checker=cancel_checker,
-    )
-
     report: Optional[DownloadReport] = None
+    downloader: Optional[Any] = None
     try:
+        downloader = provider.create_downloader(
+            state,
+            series_url=job["series_url"],
+            chapter_selector=job["chapter_selector"],
+            chapter_urls=job["chapter_urls"],
+            logger=logger,
+            progress_callback=progress_callback,
+            pause_waiter=pause_waiter,
+            cancel_checker=cancel_checker,
+        )
         report = await downloader.run()
         job["status"] = "completed"
         job["finished_at"] = now_iso()
         state.append_job_log(job, "任务完成。")
         if report.retry_file:
             job["retry_file"] = str(report.retry_file)
+        state.record_download_report(provider.provider_id, report, "completed")
     except asyncio.CancelledError:
         job["status"] = "cancelled"
         job["finished_at"] = now_iso()
         state.append_job_log(job, "任务已取消。")
+        state.record_download_report(provider.provider_id, report, "cancelled", "cancelled")
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
         job["finished_at"] = now_iso()
         state.append_job_log(job, f"任务失败：{exc}")
+        state.record_download_report(provider.provider_id, report, "failed", str(exc))
     finally:
-        await downloader.close()
+        if downloader is not None:
+            await downloader.close()
 
     book_id = str(job.get("book_id") or "")
     if book_id and report is not None and job["status"] == "completed":
@@ -1883,6 +2652,9 @@ def start_job(state: UIState, job: dict[str, Any]) -> None:
             job["status"] = "failed"
             job["error"] = str(exc)
             job["finished_at"] = now_iso()
+        finally:
+            job["task"] = None
+            dispatch_jobs(state)
 
     task.add_done_callback(_finish_callback)
 
@@ -1893,7 +2665,7 @@ async def handle_root(_: web.Request) -> web.StreamResponse:
 
 async def handle_dashboard(request: web.Request) -> web.Response:
     state = get_app_state(request)
-    msg = request.query.get("msg", "").strip()
+    msg = pop_flash_message(request)
     selected_job_id = request.query.get("job", "").strip() or (state.current_job_id or "")
     search_page = parse_int(request.query.get("sp", "1"), 1, minimum=1, maximum=999)
     search_page_size = parse_int(request.query.get("sps", "12"), 12, minimum=4, maximum=40)
@@ -1909,7 +2681,7 @@ async def handle_dashboard(request: web.Request) -> web.Response:
 
 async def handle_progress(request: web.Request) -> web.Response:
     state = get_app_state(request)
-    msg = request.query.get("msg", "").strip()
+    msg = pop_flash_message(request)
     selected_job_id = request.query.get("job", "").strip() or (state.current_job_id or "")
     html = render_progress(state, msg, selected_job_id)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
@@ -1984,7 +2756,7 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
             mode="download_all",
             provider_id=provider.provider_id,
         )
-        start_job(state, job)
+        dispatch_jobs(state)
         raise build_redirect("/progress", msg="下载任务已创建。", job=job["id"])
 
     if action == "follow_download":
@@ -2004,15 +2776,143 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
             book_id=book["id"],
             provider_id=provider.provider_id,
         )
-        start_job(state, job)
+        dispatch_jobs(state)
         raise build_redirect("/progress", msg="已加入书架并创建追更下载任务。", job=job["id"])
 
     raise build_redirect("/dashboard", msg="未知操作。")
 
 
+async def handle_batch_import(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+
+    provider_id = str(form.get("provider_id", AUTO_PROVIDER_ID)).strip().lower()
+    auto_detect = provider_id == AUTO_PROVIDER_ID
+    fallback_provider_id = first_enabled_provider_id(state)
+    if not auto_detect:
+        fallback_provider_id = provider_id
+        fixed_provider = get_provider(fallback_provider_id)
+        fixed_reason = provider_disabled_reason(state, fixed_provider)
+        if fixed_reason:
+            raise build_redirect("/dashboard", msg=f"{fixed_provider.display_name} 不可用：{fixed_reason}")
+
+    import_mode = str(form.get("import_mode", "queue_download")).strip().lower()
+    text_payload = str(form.get("import_text", "") or "")
+    filename = ""
+    file_field = form.get("import_file")
+    if hasattr(file_field, "filename") and hasattr(file_field, "file"):
+        filename = str(getattr(file_field, "filename", "") or "")
+        try:
+            text_payload = file_field.file.read().decode("utf-8", errors="ignore")
+        except Exception:
+            text_payload = ""
+
+    urls = parse_bulk_import_payload(text_payload, filename=filename)
+    if not urls:
+        raise build_redirect("/dashboard", msg="未识别到可导入的链接，请检查 txt/csv/json 内容。")
+
+    created_books = 0
+    updated_books = 0
+    queued_jobs = 0
+    skipped_urls = 0
+    detected_success = 0
+    detected_fallback = 0
+    detected_unknown = 0
+    provider_count: dict[str, int] = {}
+
+    for url in urls:
+        target_provider_id = fallback_provider_id
+        if auto_detect:
+            detected_id = detect_provider_id_by_url(url)
+            if detected_id:
+                detected_provider = get_provider(detected_id)
+                detected_reason = provider_disabled_reason(state, detected_provider)
+                if detected_reason:
+                    target_provider_id = fallback_provider_id
+                    detected_fallback += 1
+                else:
+                    target_provider_id = detected_provider.provider_id
+                    detected_success += 1
+            else:
+                detected_unknown += 1
+
+        provider = get_provider(target_provider_id)
+        reason = provider_disabled_reason(state, provider)
+        if reason:
+            skipped_urls += 1
+            continue
+
+        title = guess_title_from_url(url)
+        book, created = state.upsert_book(
+            provider_id=provider.provider_id,
+            title=title,
+            series_url=url,
+            cover="",
+        )
+        if created:
+            created_books += 1
+        else:
+            updated_books += 1
+        provider_count[provider.provider_id] = provider_count.get(provider.provider_id, 0) + 1
+
+        if import_mode == "queue_download":
+            job = state.create_job(
+                title=f"批量导入下载：{book['title']}",
+                series_url=book["series_url"],
+                chapter_selector="all",
+                chapter_urls=[],
+                mode="batch_import",
+                book_id=book["id"],
+                provider_id=provider.provider_id,
+            )
+            state.append_job_log(job, "由批量导入创建。")
+            queued_jobs += 1
+
+    await state.save_bookshelf()
+    dispatch_jobs(state)
+    provider_summary = ", ".join(
+        f"{provider_name(pid)} {count}"
+        for pid, count in sorted(provider_count.items(), key=lambda item: item[0])
+    ) or "无"
+
+    if import_mode == "queue_download":
+        if auto_detect:
+            raise build_redirect(
+                "/dashboard",
+                msg=(
+                    f"批量导入完成：链接 {len(urls)}，识别成功 {detected_success}，回退 {detected_fallback}，"
+                    f"未识别 {detected_unknown}，跳过 {skipped_urls}；新增书架 {created_books}，"
+                    f"更新 {updated_books}，入队任务 {queued_jobs}。分流：{provider_summary}。"
+                ),
+            )
+        raise build_redirect(
+            "/dashboard",
+            msg=(
+                f"批量导入完成：链接 {len(urls)}，跳过 {skipped_urls}；新增书架 {created_books}，"
+                f"更新 {updated_books}，入队任务 {queued_jobs}。站点：{provider_summary}。"
+            ),
+        )
+    if auto_detect:
+        raise build_redirect(
+            "/dashboard",
+            msg=(
+                f"批量导入完成：链接 {len(urls)}，识别成功 {detected_success}，回退 {detected_fallback}，"
+                f"未识别 {detected_unknown}，跳过 {skipped_urls}；新增书架 {created_books}，"
+                f"更新 {updated_books}。分流：{provider_summary}。"
+            ),
+        )
+    raise build_redirect(
+        "/dashboard",
+        msg=(
+            f"批量导入完成：链接 {len(urls)}，跳过 {skipped_urls}；新增书架 {created_books}，"
+            f"更新 {updated_books}。站点：{provider_summary}。"
+        ),
+    )
+
+
 async def handle_bookshelf(request: web.Request) -> web.Response:
     state = get_app_state(request)
-    msg = request.query.get("msg", "").strip()
+    msg = pop_flash_message(request)
     bookshelf_page = parse_int(request.query.get("bp", "1"), 1, minimum=1, maximum=999)
     bookshelf_page_size = parse_int(request.query.get("bps", "24"), 24, minimum=6, maximum=60)
     html = render_bookshelf(
@@ -2026,7 +2926,7 @@ async def handle_bookshelf(request: web.Request) -> web.Response:
 
 async def handle_follow(request: web.Request) -> web.Response:
     state = get_app_state(request)
-    msg = request.query.get("msg", "").strip()
+    msg = pop_flash_message(request)
     follow_page = parse_int(request.query.get("fp", "1"), 1, minimum=1, maximum=999)
     follow_page_size = parse_int(request.query.get("fps", "24"), 24, minimum=6, maximum=60)
     html = render_follow(
@@ -2036,6 +2936,72 @@ async def handle_follow(request: web.Request) -> web.Response:
         follow_page_size=follow_page_size,
     )
     return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_health(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    msg = pop_flash_message(request)
+    html = render_health(state, msg)
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_bookshelf_jm_login(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    provider = get_provider("jmcomic")
+    form = await request.post()
+    bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
+    bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+
+    reason = provider_disabled_reason(state, provider)
+    if reason:
+        raise build_redirect("/bookshelf", msg=f"JM 不可用：{reason}", bp=bp, bps=bps)
+
+    if not state.jm_username or not state.jm_password:
+        raise build_redirect("/settings", msg="请先填写 JM 用户名和密码，再手动登录。")
+
+    try:
+        login_user = await manual_login_jm(
+            output_dir=state.output_dir,
+            chapter_concurrency=state.chapter_concurrency,
+            image_concurrency=state.image_concurrency,
+            retries=state.retries,
+            timeout=state.timeout,
+            jm_username=state.jm_username,
+            jm_password=state.jm_password,
+        )
+    except Exception as exc:
+        state.jm_manual_logged_in = False
+        state.jm_manual_login_user = ""
+        raise build_redirect("/bookshelf", msg=f"JM 手动登录失败：{exc}", bp=bp, bps=bps)
+
+    state.jm_manual_logged_in = True
+    state.jm_manual_login_user = login_user
+    raise build_redirect("/bookshelf", msg=f"JM 手动登录成功：{login_user}", bp=bp, bps=bps)
+
+
+async def handle_bookshelf_jm_logout(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+    bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
+    bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+
+    try:
+        await manual_logout_jm(
+            output_dir=state.output_dir,
+            chapter_concurrency=state.chapter_concurrency,
+            image_concurrency=state.image_concurrency,
+            retries=state.retries,
+            timeout=state.timeout,
+            jm_username=state.jm_username,
+            jm_password=state.jm_password,
+        )
+    except Exception:
+        # Some jmcomic versions may not expose logout, treat local logout as source of truth.
+        pass
+
+    state.jm_manual_logged_in = False
+    state.jm_manual_login_user = ""
+    raise build_redirect("/bookshelf", msg="JM 已退出手动登录状态。", bp=bp, bps=bps)
 
 
 async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.StreamResponse:
@@ -2165,14 +3131,14 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
             book_id=book["id"],
             provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
         )
-        start_job(state, job)
+        dispatch_jobs(state)
         raise build_redirect("/progress", msg="任务已创建。", job=job["id"])
 
     raise back_redirect("未知操作。")
 
 async def handle_settings_get(request: web.Request) -> web.Response:
     state = get_app_state(request)
-    msg = request.query.get("msg", "").strip()
+    msg = pop_flash_message(request)
     html = render_settings(state, msg)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
@@ -2186,6 +3152,32 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
         state.image_concurrency = max(1, int(form.get("image_concurrency", state.image_concurrency)))
         state.retries = max(1, int(form.get("retries", state.retries)))
         state.timeout = max(10, int(form.get("timeout", state.timeout)))
+        state.max_parallel_jobs = parse_int(form.get("max_parallel_jobs", state.max_parallel_jobs), state.max_parallel_jobs, minimum=1, maximum=20)
+        state.retry_base_delay_seconds = max(0.2, float(form.get("retry_base_delay_seconds", state.retry_base_delay_seconds)))
+        state.retry_recoverable_only = str(form.get("retry_recoverable_only", "1")).strip() == "1"
+        state.enable_chapter_dedupe = str(form.get("enable_chapter_dedupe", "1")).strip() == "1"
+        image_fmt = str(form.get("image_output_format", state.image_output_format)).strip().lower()
+        state.image_output_format = image_fmt if image_fmt in {"original", "jpg", "webp"} else "original"
+        state.image_quality = parse_int(form.get("image_quality", state.image_quality), state.image_quality, minimum=1, maximum=100)
+        state.keep_original_images = str(form.get("keep_original_images", "0")).strip() == "1"
+        archive_fmt = str(form.get("auto_archive_format", state.auto_archive_format)).strip().lower()
+        state.auto_archive_format = archive_fmt if archive_fmt in {"none", "cbz", "zip"} else "none"
+        state.write_metadata_sidecar = str(form.get("write_metadata_sidecar", "1")).strip() == "1"
+        state.manga_dir_template = str(form.get("manga_dir_template", state.manga_dir_template)).strip() or "{site}/{manga}"
+        state.chapter_dir_template = str(form.get("chapter_dir_template", state.chapter_dir_template)).strip() or "{chapter_number}-{chapter_title}"
+        state.page_name_template = str(form.get("page_name_template", state.page_name_template)).strip() or "{page:03}"
+        state.bandwidth_day_kbps = max(0, int(form.get("bandwidth_day_kbps", state.bandwidth_day_kbps)))
+        state.bandwidth_night_kbps = max(0, int(form.get("bandwidth_night_kbps", state.bandwidth_night_kbps)))
+        state.night_start_hour = parse_int(form.get("night_start_hour", state.night_start_hour), state.night_start_hour, minimum=0, maximum=23)
+        state.night_end_hour = parse_int(form.get("night_end_hour", state.night_end_hour), state.night_end_hour, minimum=0, maximum=23)
+        scheduler_enabled_before = state.scheduler_enabled
+        state.scheduler_enabled = str(form.get("scheduler_enabled", "0")).strip() == "1"
+        state.scheduler_interval_minutes = parse_int(form.get("scheduler_interval_minutes", state.scheduler_interval_minutes), state.scheduler_interval_minutes, minimum=5, maximum=1440)
+        state.scheduler_auto_download = str(form.get("scheduler_auto_download", "1")).strip() == "1"
+        if state.scheduler_enabled and (not scheduler_enabled_before or not state.scheduler_next_run_at):
+            state.schedule_next_run(immediate=False)
+        if not state.scheduler_enabled:
+            state.scheduler_next_run_at = ""
         state.redis_host = str(form.get("redis_host", "")).strip()
         state.redis_port = parse_int(form.get("redis_port", state.redis_port), state.redis_port, minimum=1, maximum=65535)
         state.redis_db = parse_int(form.get("redis_db", state.redis_db), state.redis_db, minimum=0, maximum=999999)
@@ -2195,11 +3187,14 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
         state.cache_enabled = str(form.get("cache_enabled", "1")) == "1"
         state.jm_username = str(form.get("jm_username", state.jm_username)).strip()
         state.jm_password = str(form.get("jm_password", state.jm_password)).strip()
+        state.jm_manual_logged_in = False
+        state.jm_manual_login_user = ""
         enabled_values = []
         if hasattr(form, "getall"):
             enabled_values = [str(v).strip().lower() for v in form.getall("enabled_providers") if str(v).strip()]
         state.set_enabled_providers(set(enabled_values))
         await state.save_settings()
+        dispatch_jobs(state)
     except Exception as exc:
         raise build_redirect("/settings", msg=f"保存失败：{exc}")
     raise build_redirect("/settings", msg="设置已保存。")
@@ -2234,17 +3229,49 @@ async def handle_job_action(request: web.Request) -> web.Response:
     elif action == "cancel" and status in {"queued", "running", "paused", "cancelling"}:
         job["cancel_requested"] = True
         job["pause_event"].set()
-        job["status"] = "cancelling"
-        state.append_job_log(job, "收到取消请求，正在停止任务。")
         task = job.get("task")
+        if task is None:
+            job["status"] = "cancelled"
+            job["finished_at"] = now_iso()
+            state.append_job_log(job, "排队任务已取消。")
+        else:
+            job["status"] = "cancelling"
+            state.append_job_log(job, "收到取消请求，正在停止任务。")
         if task is not None and not task.done():
             task.cancel()
+    dispatch_jobs(state)
 
     return web.json_response({"ok": True, "state": serialize_job(job)})
 
 
+async def handle_scheduler_run(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    if state._scheduler_running:
+        raise build_redirect("/health", msg="计划任务正在执行中，请稍后刷新。")
+
+    state._scheduler_running = True
+    try:
+        scanned, enqueued = await run_scheduler_cycle(state)
+        state.scheduler_last_run_at = now_iso()
+        if state.scheduler_enabled:
+            state.schedule_next_run(immediate=False)
+        await state.save_settings()
+    except Exception as exc:
+        state._scheduler_running = False
+        raise build_redirect("/health", msg=f"计划任务执行失败：{exc}")
+    finally:
+        state._scheduler_running = False
+
+    raise build_redirect("/health", msg=f"计划任务执行完成：检查 {scanned} 本，新增任务 {enqueued} 个。")
+
+
 async def on_shutdown(app: web.Application) -> None:
     state: UIState = app["state"]
+    scheduler_task: Optional[asyncio.Task[Any]] = app.get("scheduler_task")
+    if scheduler_task is not None and not scheduler_task.done():
+        scheduler_task.cancel()
+        await asyncio.gather(scheduler_task, return_exceptions=True)
+
     waits: list[asyncio.Task[Any]] = []
     for job in state.jobs.values():
         task = job.get("task")
@@ -2257,6 +3284,15 @@ async def on_shutdown(app: web.Application) -> None:
         await asyncio.gather(*waits, return_exceptions=True)
 
 
+async def on_startup(app: web.Application) -> None:
+    state: UIState = app["state"]
+    dispatch_jobs(state)
+    if state.scheduler_enabled and not state.scheduler_next_run_at:
+        state.schedule_next_run(immediate=False)
+        await state.save_settings()
+    app["scheduler_task"] = asyncio.create_task(scheduler_loop(app))
+
+
 def create_app() -> web.Application:
     ensure_providers_loaded()
     ensure_data_dir_ready()
@@ -2264,7 +3300,7 @@ def create_app() -> web.Application:
     state.load()
     state.output_dir.mkdir(parents=True, exist_ok=True)
 
-    app = web.Application()
+    app = web.Application(middlewares=[flash_message_middleware])
     app["state"] = state
 
     app.add_routes(
@@ -2274,15 +3310,21 @@ def create_app() -> web.Application:
             web.get("/progress", handle_progress),
             web.post("/search", handle_search),
             web.post("/search/action", handle_search_action),
+            web.post("/dashboard/import", handle_batch_import),
             web.get("/bookshelf", handle_bookshelf),
+            web.post("/bookshelf/jm-login", handle_bookshelf_jm_login),
+            web.post("/bookshelf/jm-logout", handle_bookshelf_jm_logout),
             web.get("/follow", handle_follow),
+            web.get("/health", handle_health),
             web.post("/bookshelf/sync-jm-favorites", handle_bookshelf_sync_jm_favorites),
             web.post("/bookshelf/{book_id}/{action}", handle_book_action),
             web.get("/settings", handle_settings_get),
             web.post("/settings", handle_settings_post),
             web.get("/job/{job_id}/state", handle_job_state),
             web.post("/job/{job_id}/{action}", handle_job_action),
+            web.post("/scheduler/run", handle_scheduler_run),
         ]
     )
+    app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app

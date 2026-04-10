@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import logging
 import re
 import subprocess
 import sys
@@ -20,6 +21,23 @@ PIP_SOURCES = [
     ("Aliyun", "https://mirrors.aliyun.com/pypi/simple", "https://mirrors.aliyun.com/pypi/simple/pip/"),
     ("USTC", "https://pypi.mirrors.ustc.edu.cn/simple", "https://pypi.mirrors.ustc.edu.cn/simple/pip/"),
 ]
+
+
+def safe_print(message: str) -> None:
+    text = str(message)
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        fallback = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="ignore")
+        print(fallback)
+    except Exception:
+        # Last resort: avoid crashing startup due to terminal encoding.
+        print(text.encode("ascii", errors="backslashreplace").decode("ascii"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,12 +115,12 @@ def select_best_pip_source(timeout_seconds: float = 1.8) -> tuple[str, str]:
 def auto_install_dependencies(requirements_file: Path) -> None:
     missing_packages = find_missing_packages(requirements_file)
     if not missing_packages:
-        print("[bootstrap] 依赖检查完成，未发现缺失。")
+        safe_print("[bootstrap] 依赖检查完成，未发现缺失。")
         return
 
-    print(f"[bootstrap] 检测到缺失依赖：{', '.join(missing_packages)}")
+    safe_print(f"[bootstrap] 检测到缺失依赖：{', '.join(missing_packages)}")
     source_name, index_url = select_best_pip_source()
-    print(f"[bootstrap] 自动选择 pip 源：{source_name} ({index_url})")
+    safe_print(f"[bootstrap] 自动选择 pip 源：{source_name} ({index_url})")
 
     command = [
         sys.executable,
@@ -123,7 +141,7 @@ def auto_install_dependencies(requirements_file: Path) -> None:
     if result.returncode != 0:
         raise RuntimeError("自动安装依赖失败，请检查网络或手动执行 pip install -r requirements.txt")
 
-    print("[bootstrap] 依赖安装完成。")
+    safe_print("[bootstrap] 依赖安装完成。")
 
 
 def main() -> None:
@@ -134,8 +152,31 @@ def main() -> None:
     from aiohttp import web
     from app.webui import create_app
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    access_logger = logging.getLogger("aiohttp.access")
+
     app = create_app()
-    web.run_app(app, host=args.host, port=args.port)
+    try:
+        web.run_app(
+            app,
+            host=args.host,
+            port=args.port,
+            access_log=access_logger,
+            access_log_format='%a "%r" %s %b',
+            print=safe_print,
+        )
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        errno = getattr(exc, "errno", None)
+        text = str(exc)
+        if winerror == 10048 or errno == 10048 or "10048" in text:
+            raise SystemExit(
+                f"端口 {args.port} 已被占用，程序已退出。请释放该端口后重试，或使用 --port 指定其它固定端口。"
+            ) from exc
+        raise
 
 
 if __name__ == "__main__":

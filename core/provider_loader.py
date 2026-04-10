@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from core.provider_base import SiteProvider
 
@@ -21,7 +21,7 @@ def load_provider_plugins(
     plugins_dir: Path,
     context: dict[str, Any],
     *,
-    logger: Callable[[str], None] | None = None,
+    logger: Optional[Callable[[str], None]] = None,
 ) -> dict[str, SiteProvider]:
     providers: dict[str, SiteProvider] = {}
     if not plugins_dir.exists():

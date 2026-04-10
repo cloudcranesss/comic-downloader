@@ -3,14 +3,118 @@
   <h2 class="title">设置</h2>
   <form method="post" action="/settings">
     <div class="settings-section">
-      <h3 class="settings-title">下载配置</h3>
+      <h3 class="settings-title">基础下载</h3>
       <div class="settings-grid">
         <div><label>下载目录</label><input class="input" name="output_dir" value="{{ settings.output_dir }}" /></div>
+        <div><label>任务并行数</label><input class="input" name="max_parallel_jobs" type="number" min="1" max="20" value="{{ settings.max_parallel_jobs }}" /></div>
         <div><label>章节并发</label><input class="input" name="chapter_concurrency" type="number" min="1" value="{{ settings.chapter_concurrency }}" /></div>
         <div><label>图片并发</label><input class="input" name="image_concurrency" type="number" min="1" value="{{ settings.image_concurrency }}" /></div>
-        <div><label>重试次数</label><input class="input" name="retries" type="number" min="1" value="{{ settings.retries }}" /></div>
+        <div><label>请求重试次数</label><input class="input" name="retries" type="number" min="1" value="{{ settings.retries }}" /></div>
         <div><label>超时（秒）</label><input class="input" name="timeout" type="number" min="10" value="{{ settings.timeout }}" /></div>
       </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">失败重试与断点续传</h3>
+      <div class="settings-grid">
+        <div><label>指数退避基准（秒）</label><input class="input" name="retry_base_delay_seconds" type="number" min="0.2" step="0.1" value="{{ settings.retry_base_delay_seconds }}" /></div>
+        <div>
+          <label>重试范围</label>
+          <select class="select" name="retry_recoverable_only">
+            <option value="1"{% if settings.retry_recoverable_only %} selected{% endif %}>仅可恢复错误（超时/429/网络）</option>
+            <option value="0"{% if not settings.retry_recoverable_only %} selected{% endif %}>全部错误都重试</option>
+          </select>
+        </div>
+        <div>
+          <label>章节去重与续传</label>
+          <select class="select" name="enable_chapter_dedupe">
+            <option value="1"{% if settings.enable_chapter_dedupe %} selected{% endif %}>开启</option>
+            <option value="0"{% if not settings.enable_chapter_dedupe %} selected{% endif %}>关闭</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">图片质量与归档</h3>
+      <div class="settings-grid">
+        <div>
+          <label>输出格式</label>
+          <select class="select" name="image_output_format">
+            <option value="original"{% if settings.image_output_format == "original" %} selected{% endif %}>原格式</option>
+            <option value="jpg"{% if settings.image_output_format == "jpg" %} selected{% endif %}>JPG</option>
+            <option value="webp"{% if settings.image_output_format == "webp" %} selected{% endif %}>WEBP</option>
+          </select>
+        </div>
+        <div><label>压缩质量（1-100）</label><input class="input" name="image_quality" type="number" min="1" max="100" value="{{ settings.image_quality }}" /></div>
+        <div>
+          <label>保留原图</label>
+          <select class="select" name="keep_original_images">
+            <option value="0"{% if not settings.keep_original_images %} selected{% endif %}>否</option>
+            <option value="1"{% if settings.keep_original_images %} selected{% endif %}>是</option>
+          </select>
+        </div>
+        <div>
+          <label>下载后归档</label>
+          <select class="select" name="auto_archive_format">
+            <option value="none"{% if settings.auto_archive_format == "none" %} selected{% endif %}>不归档</option>
+            <option value="cbz"{% if settings.auto_archive_format == "cbz" %} selected{% endif %}>CBZ</option>
+            <option value="zip"{% if settings.auto_archive_format == "zip" %} selected{% endif %}>ZIP</option>
+          </select>
+        </div>
+        <div>
+          <label>输出 metadata.json</label>
+          <select class="select" name="write_metadata_sidecar">
+            <option value="1"{% if settings.write_metadata_sidecar %} selected{% endif %}>开启</option>
+            <option value="0"{% if not settings.write_metadata_sidecar %} selected{% endif %}>关闭</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">命名规则模板</h3>
+      <div class="settings-grid">
+        <div><label>漫画目录模板</label><input class="input tpl-field" id="tpl-manga" name="manga_dir_template" value="{{ settings.manga_dir_template }}" /></div>
+        <div><label>章节目录模板</label><input class="input tpl-field" id="tpl-chapter" name="chapter_dir_template" value="{{ settings.chapter_dir_template }}" /></div>
+        <div><label>页码文件名模板</label><input class="input tpl-field" id="tpl-page" name="page_name_template" value="{{ settings.page_name_template }}" /></div>
+      </div>
+      <div class="subtle" style="margin-top:8px;">
+        可用变量：`{site}` `{manga}` `{chapter_number}` `{chapter_title}` `{chapter_index}` `{page}`。
+      </div>
+      <div class="subtle" id="tpl-preview" style="margin-top:6px;">预览：</div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">下载限速与时段</h3>
+      <div class="settings-grid">
+        <div><label>白天限速（KB/s，0=不限速）</label><input class="input" name="bandwidth_day_kbps" type="number" min="0" value="{{ settings.bandwidth_day_kbps }}" /></div>
+        <div><label>夜间限速（KB/s，0=不限速）</label><input class="input" name="bandwidth_night_kbps" type="number" min="0" value="{{ settings.bandwidth_night_kbps }}" /></div>
+        <div><label>夜间开始小时（0-23）</label><input class="input" name="night_start_hour" type="number" min="0" max="23" value="{{ settings.night_start_hour }}" /></div>
+        <div><label>夜间结束小时（0-23）</label><input class="input" name="night_end_hour" type="number" min="0" max="23" value="{{ settings.night_end_hour }}" /></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">下载计划任务</h3>
+      <div class="settings-grid">
+        <div>
+          <label>计划任务开关</label>
+          <select class="select" name="scheduler_enabled">
+            <option value="1"{% if settings.scheduler_enabled %} selected{% endif %}>开启</option>
+            <option value="0"{% if not settings.scheduler_enabled %} selected{% endif %}>关闭</option>
+          </select>
+        </div>
+        <div><label>检查间隔（分钟）</label><input class="input" name="scheduler_interval_minutes" type="number" min="5" max="1440" value="{{ settings.scheduler_interval_minutes }}" /></div>
+        <div>
+          <label>检查到更新后自动下载</label>
+          <select class="select" name="scheduler_auto_download">
+            <option value="1"{% if settings.scheduler_auto_download %} selected{% endif %}>是</option>
+            <option value="0"{% if not settings.scheduler_auto_download %} selected{% endif %}>否</option>
+          </select>
+        </div>
+      </div>
+      <div class="subtle" style="margin-top:8px;">上次执行：{{ settings.scheduler_last_run_at }} | 下次执行：{{ settings.scheduler_next_run_at }}</div>
     </div>
 
     <div class="settings-section">
@@ -19,8 +123,8 @@
         <div><label>Redis Host</label><input class="input" name="redis_host" value="{{ settings.redis_host }}" placeholder="127.0.0.1" /></div>
         <div><label>Redis Port</label><input class="input" name="redis_port" type="number" min="1" max="65535" value="{{ settings.redis_port }}" /></div>
         <div><label>Redis DB</label><input class="input" name="redis_db" type="number" min="0" value="{{ settings.redis_db }}" /></div>
-        <div><label>Redis 用户名（可为空）</label><input class="input" name="redis_username" value="{{ settings.redis_username }}" /></div>
-        <div><label>Redis 密码（可为空）</label><input class="input" type="password" name="redis_password" value="{{ settings.redis_password }}" autocomplete="new-password" /></div>
+        <div><label>Redis 用户名（可空）</label><input class="input" name="redis_username" value="{{ settings.redis_username }}" /></div>
+        <div><label>Redis 密码（可空）</label><input class="input" type="password" name="redis_password" value="{{ settings.redis_password }}" autocomplete="new-password" /></div>
         <div><label>缓存 TTL（秒）</label><input class="input" name="cache_ttl_seconds" type="number" min="30" value="{{ settings.cache_ttl_seconds }}" /></div>
         <div>
           <label>缓存开关</label>
@@ -43,7 +147,7 @@
             {% if site.runtime_available %}
             <div class="subtle">运行状态：可用</div>
             {% else %}
-            <div class="subtle" style="color:#fecaca;">运行状态：不可用</div>
+            <div class="subtle" style="color:#b91c1c;">运行状态：不可用</div>
             {% endif %}
             {% if site.reason %}
             <div class="subtle" style="margin-top:4px;">{{ site.reason }}</div>
@@ -52,7 +156,6 @@
         </label>
         {% endfor %}
       </div>
-      <div class="subtle" style="margin-top:8px;">可勾选你想使用的站点；未勾选的站点将无法搜索、下载和同步。</div>
     </div>
 
     <div class="settings-section">
@@ -64,10 +167,50 @@
       {% if settings.jm_enabled %}
       <div class="subtle" style="margin-top:8px;">JM 状态：可用，支持登录与同步收藏。</div>
       {% else %}
-      <div class="subtle" style="margin-top:8px;color:#fecaca;">JM 状态：不可用（{{ settings.jm_disabled_reason }}）。</div>
+      <div class="subtle" style="margin-top:8px;color:#b91c1c;">JM 状态：不可用（{{ settings.jm_disabled_reason }}）。</div>
       {% endif %}
     </div>
 
     <div style="margin-top:12px;"><button class="btn" type="submit">保存设置</button></div>
   </form>
 </div>
+
+<script>
+(function(){
+  const manga = document.getElementById('tpl-manga');
+  const chapter = document.getElementById('tpl-chapter');
+  const page = document.getElementById('tpl-page');
+  const preview = document.getElementById('tpl-preview');
+  if (!manga || !chapter || !page || !preview) return;
+
+  function render(tpl, vars){
+    return String(tpl || '').replace(/\{([^{}]+)\}/g, function(_, key){
+      const raw = String(key || '').trim();
+      if (!raw) return '';
+      const base = raw.split(':')[0].trim();
+      if (!(base in vars)) return '{' + raw + '}';
+      return String(vars[base]);
+    });
+  }
+
+  function update(){
+    const vars = {
+      site: 'toonily',
+      manga: '示例漫画',
+      chapter_number: '12',
+      chapter_title: 'The Return',
+      chapter_index: 12,
+      page: '003'
+    };
+    const p1 = render(manga.value, vars);
+    const p2 = render(chapter.value, vars);
+    const p3 = render(page.value, vars);
+    preview.textContent = '预览：' + p1 + '/' + p2 + '/' + p3 + '.jpg';
+  }
+
+  manga.addEventListener('input', update);
+  chapter.addEventListener('input', update);
+  page.addEventListener('input', update);
+  update();
+})();
+</script>

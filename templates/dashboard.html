@@ -1,21 +1,58 @@
 {{ message_html | safe }}
-<div class="panel">
-  <h2 class="title">搜索漫画并操作</h2>
-  <div class="subtle" style="margin-bottom:10px;">主页已合并：创建下载任务与追更入口都放在搜索结果内。</div>
-  <form class="search-form" method="post" action="/search">
-    <input class="input" style="flex:1 1 460px;" name="query" placeholder="输入漫画名称（例如 Wireless Onahole）" value="{{ search_query }}" />
-    <select class="select" style="flex:0 0 220px;" name="provider_id">
-      {% for opt in provider_options %}
-      <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
-      {% endfor %}
-    </select>
-    <select class="select" style="flex:0 0 140px;" name="page_size">
-      {% for opt in search_page_size_options %}
-      <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>每页 {{ opt.value }}</option>
-      {% endfor %}
-    </select>
-    <button class="btn" type="submit">搜索</button>
-  </form>
+<div class="split-grid">
+  <div class="panel">
+    <h2 class="title">搜索漫画并操作</h2>
+    <div class="subtle" style="margin-bottom:10px;">搜索后可直接加入书架、下载全部或追更下载。</div>
+    <form class="search-form" method="post" action="/search">
+      <input class="input" name="query" placeholder="输入漫画名称（例如 Wireless Onahole）" value="{{ search_query }}" />
+      <select class="select" name="provider_id">
+        {% for opt in provider_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+        {% endfor %}
+      </select>
+      <select class="select" name="page_size">
+        {% for opt in search_page_size_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>每页 {{ opt.value }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn" type="submit">搜索</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2 class="title">批量导入任务</h2>
+    <div class="subtle" style="margin-bottom:8px;">支持 txt/csv/json，自动识别链接并入队。</div>
+    <form method="post" action="/dashboard/import" enctype="multipart/form-data">
+      <div class="settings-grid">
+        <div>
+          <label>站点</label>
+          <select class="select" name="provider_id">
+            {% for opt in import_provider_options %}
+            <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>导入模式</label>
+          <select class="select" name="import_mode">
+            <option value="queue_download">导入并创建下载队列</option>
+            <option value="bookshelf_only">仅导入到书架</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <label>上传文件（可选）</label>
+        <input class="input" type="file" name="import_file" accept=".txt,.csv,.json,text/plain,application/json,text/csv" />
+      </div>
+      <div style="margin-top:10px;">
+        <label>或粘贴链接/数据</label>
+        <textarea class="input" name="import_text" rows="5" placeholder="每行一个链接，或粘贴 JSON/CSV 内容"></textarea>
+      </div>
+      <div style="margin-top:10px;">
+        <button class="btn secondary" type="submit">开始批量导入</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 {% if results %}
