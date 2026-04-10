@@ -1,0 +1,57 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F3F8FF"/>
+      <stop offset="1" stop-color="#E5F1FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <style>
+    .box { fill: #ffffff; stroke: #a7c4e8; stroke-width: 2; rx: 14; }
+    .title { font: 700 24px 'Segoe UI', Arial, sans-serif; fill: #17335d; }
+    .txt { font: 500 18px 'Segoe UI', Arial, sans-serif; fill: #264d80; }
+    .arrow { stroke: #3f76b6; stroke-width: 3; marker-end: url(#arrowHead); }
+  </style>
+
+  <defs>
+    <marker id="arrowHead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 9 3, 0 6" fill="#3f76b6" />
+    </marker>
+  </defs>
+
+  <rect class="box" x="60" y="84" width="220" height="90"/>
+  <text class="title" x="96" y="136">Browser</text>
+
+  <rect class="box" x="360" y="84" width="280" height="90"/>
+  <text class="title" x="420" y="136">aiohttp WebUI</text>
+
+  <rect class="box" x="740" y="44" width="220" height="90"/>
+  <text class="title" x="784" y="96">Toonily</text>
+  <rect class="box" x="740" y="164" width="220" height="90"/>
+  <text class="title" x="800" y="216">JM</text>
+
+  <rect class="box" x="360" y="294" width="280" height="100"/>
+  <text class="title" x="430" y="346">Scheduler</text>
+
+  <rect class="box" x="740" y="294" width="420" height="100"/>
+  <text class="title" x="790" y="346">Downloaders / Providers</text>
+
+  <rect class="box" x="360" y="474" width="280" height="100"/>
+  <text class="title" x="420" y="526">data/*.json</text>
+  <text class="txt" x="430" y="552">settings / bookshelf</text>
+
+  <rect class="box" x="740" y="474" width="420" height="100"/>
+  <text class="title" x="790" y="526">downloads/</text>
+  <text class="txt" x="790" y="552">images / zip / cbz / metadata</text>
+
+  <line class="arrow" x1="280" y1="129" x2="360" y2="129"/>
+  <line class="arrow" x1="640" y1="109" x2="740" y2="89"/>
+  <line class="arrow" x1="640" y1="149" x2="740" y2="209"/>
+  <line class="arrow" x1="500" y1="174" x2="500" y2="294"/>
+  <line class="arrow" x1="640" y1="344" x2="740" y2="344"/>
+  <line class="arrow" x1="500" y1="394" x2="500" y2="474"/>
+  <line class="arrow" x1="950" y1="394" x2="950" y2="474"/>
+
+  <text class="txt" x="70" y="44">Runtime data flow</text>
+</svg>
