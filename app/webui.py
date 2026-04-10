@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 from bs4 import BeautifulSoup
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -110,6 +110,13 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def form_getall_str(form: Any, key: str) -> list[str]:
+    if hasattr(form, "getall"):
+        return [str(v).strip() for v in form.getall(key) if str(v).strip()]
+    value = str(form.get(key, "") or "").strip() if hasattr(form, "get") else ""
+    return [value] if value else []
 
 
 def format_chapter_number(num: Optional[float]) -> str:
@@ -228,7 +235,10 @@ class UIState:
     def __init__(self) -> None:
         self.bookshelf: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
+        self.job_order_counter = 0
         self.current_job_id: Optional[str] = None
+        self.job_history: list[dict[str, Any]] = []
+        self.max_job_history = 500
         self.last_search_query = ""
         self.last_search_provider = DEFAULT_PROVIDER_ID
         self.last_search_results: list[dict[str, Any]] = []
@@ -284,6 +294,13 @@ class UIState:
         self.jm_manual_logged_in = False
         self.jm_manual_login_user = ""
         self.enabled_provider_ids: set[str] = set(PROVIDERS.keys()) or {DEFAULT_PROVIDER_ID}
+        self.webhook_enabled = False
+        self.webhook_url = ""
+        self.webhook_token = ""
+        self.webhook_event_completed = True
+        self.webhook_event_failed = True
+        self.webhook_event_cancelled = False
+        self.webhook_timeout_seconds = 8
 
         self.max_job_logs = 600
         self._save_lock = asyncio.Lock()
@@ -329,6 +346,18 @@ class UIState:
                 self.cache_ttl_seconds = max(30, int(raw.get("cache_ttl_seconds", self.cache_ttl_seconds)))
                 self.jm_username = str(raw.get("jm_username", self.jm_username)).strip()
                 self.jm_password = str(raw.get("jm_password", self.jm_password)).strip()
+                self.webhook_enabled = parse_bool(raw.get("webhook_enabled", self.webhook_enabled), self.webhook_enabled)
+                self.webhook_url = str(raw.get("webhook_url", self.webhook_url)).strip()
+                self.webhook_token = str(raw.get("webhook_token", self.webhook_token)).strip()
+                self.webhook_event_completed = parse_bool(raw.get("webhook_event_completed", self.webhook_event_completed), self.webhook_event_completed)
+                self.webhook_event_failed = parse_bool(raw.get("webhook_event_failed", self.webhook_event_failed), self.webhook_event_failed)
+                self.webhook_event_cancelled = parse_bool(raw.get("webhook_event_cancelled", self.webhook_event_cancelled), self.webhook_event_cancelled)
+                self.webhook_timeout_seconds = parse_int(
+                    raw.get("webhook_timeout_seconds", self.webhook_timeout_seconds),
+                    self.webhook_timeout_seconds,
+                    minimum=3,
+                    maximum=30,
+                )
                 if not self.redis_host:
                     legacy_redis_url = str(raw.get("redis_url", "")).strip()
                     if legacy_redis_url:
@@ -414,6 +443,13 @@ class UIState:
             "cache_ttl_seconds": self.cache_ttl_seconds,
             "jm_username": self.jm_username,
             "jm_password": self.jm_password,
+            "webhook_enabled": self.webhook_enabled,
+            "webhook_url": self.webhook_url,
+            "webhook_token": self.webhook_token,
+            "webhook_event_completed": self.webhook_event_completed,
+            "webhook_event_failed": self.webhook_event_failed,
+            "webhook_event_cancelled": self.webhook_event_cancelled,
+            "webhook_timeout_seconds": self.webhook_timeout_seconds,
             "enabled_providers": sorted(self.enabled_provider_ids),
         }
         async with self._save_lock:
@@ -536,6 +572,7 @@ class UIState:
             "title": str(raw.get("title") or "未命名漫画").strip(),
             "series_url": series_url,
             "cover": str(raw.get("cover") or "").strip(),
+            "group": str(raw.get("group") or "").strip(),
             "follow_enabled": bool(raw.get("follow_enabled", True)),
             "last_downloaded_chapter_number": parse_float(raw.get("last_downloaded_chapter_number")),
             "last_downloaded_chapter_title": str(raw.get("last_downloaded_chapter_title") or "").strip(),
@@ -563,9 +600,11 @@ class UIState:
         title: str,
         series_url: str,
         cover: str = "",
+        group: str = "",
     ) -> tuple[dict[str, Any], bool]:
         pid = (provider_id or DEFAULT_PROVIDER_ID).strip().lower() or DEFAULT_PROVIDER_ID
         normalized = normalize_url(series_url)
+        group_name = str(group or "").strip()
         for book in self.bookshelf.values():
             if (
                 book.get("provider_id", DEFAULT_PROVIDER_ID) == pid
@@ -575,6 +614,8 @@ class UIState:
                     book["title"] = title
                 if cover:
                     book["cover"] = cover
+                if group_name:
+                    book["group"] = group_name
                 return book, False
 
         book = self._normalize_book_item(
@@ -584,6 +625,7 @@ class UIState:
                 "title": title or "未命名漫画",
                 "series_url": normalized,
                 "cover": cover,
+                "group": group_name,
                 "follow_enabled": True,
             }
         )
@@ -607,6 +649,20 @@ class UIState:
             # Console logging must never affect in-memory job logging.
             pass
 
+    def append_job_history(self, item: dict[str, Any]) -> None:
+        self.job_history.append(item)
+        if len(self.job_history) > self.max_job_history:
+            del self.job_history[0 : len(self.job_history) - self.max_job_history]
+
+    def webhook_event_enabled(self, status: str) -> bool:
+        if status == "completed":
+            return self.webhook_event_completed
+        if status == "failed":
+            return self.webhook_event_failed
+        if status == "cancelled":
+            return self.webhook_event_cancelled
+        return False
+
     def create_job(
         self,
         *,
@@ -621,6 +677,7 @@ class UIState:
         job_id = uuid.uuid4().hex[:10]
         pause_event = asyncio.Event()
         pause_event.set()
+        self.job_order_counter += 1
 
         job = {
             "id": job_id,
@@ -635,6 +692,7 @@ class UIState:
             "error": "",
             "retry_file": "",
             "created_at": now_iso(),
+            "queue_order": self.job_order_counter,
             "started_at": "",
             "finished_at": "",
             "done_chapters": 0,
@@ -662,6 +720,25 @@ def chapter_percent(done_count: int, total_count: int) -> int:
 
 def is_job_final(status: str) -> bool:
     return status in {"completed", "failed", "cancelled"}
+
+
+def queue_order_value(job: dict[str, Any]) -> int:
+    fallback = parse_int(job.get("created_order", 999999999), 999999999, minimum=0, maximum=999999999)
+    return parse_int(job.get("queue_order", fallback), fallback, minimum=0, maximum=999999999)
+
+
+def queued_jobs_sorted(state: UIState) -> list[dict[str, Any]]:
+    jobs = [job for job in state.jobs.values() if job.get("status") == "queued"]
+    jobs.sort(key=lambda row: (queue_order_value(row), str(row.get("created_at", ""))))
+    return jobs
+
+
+def normalize_queue_orders(state: UIState) -> None:
+    queued = queued_jobs_sorted(state)
+    for idx, job in enumerate(queued, start=1):
+        job["queue_order"] = idx
+    if queued:
+        state.job_order_counter = max(state.job_order_counter, len(queued))
 
 
 def parse_iso_datetime(value: str) -> Optional[datetime]:
@@ -721,8 +798,7 @@ def dispatch_jobs(state: UIState) -> None:
     if active >= state.max_parallel_jobs:
         return
 
-    queued_jobs = [job for job in state.jobs.values() if job.get("status") == "queued" and job.get("task") is None]
-    queued_jobs.sort(key=lambda row: str(row.get("created_at", "")))
+    queued_jobs = [job for job in queued_jobs_sorted(state) if job.get("task") is None]
     for job in queued_jobs:
         if active >= state.max_parallel_jobs:
             break
@@ -1135,6 +1211,128 @@ def pick_latest_report_chapter(report: DownloadReport) -> tuple[Optional[str], O
     return item.url, item.title, item.number
 
 
+def build_job_history_item(
+    *,
+    job: dict[str, Any],
+    report: Optional[DownloadReport],
+) -> dict[str, Any]:
+    started = parse_iso_datetime(str(job.get("started_at", "")))
+    finished = parse_iso_datetime(str(job.get("finished_at", "")))
+    duration_seconds = 0.0
+    if started is not None and finished is not None:
+        duration_seconds = max(0.0, (finished - started).total_seconds())
+    speed_kbps = 0.0
+    if report is not None:
+        elapsed = max(0.0, (report.finished_at - report.started_at).total_seconds())
+        if elapsed > 0:
+            speed_kbps = round((max(0, int(report.downloaded_bytes or 0)) / elapsed) / 1024, 2)
+    return {
+        "job_id": str(job.get("id") or ""),
+        "title": str(job.get("title") or ""),
+        "provider_id": str(job.get("provider_id") or DEFAULT_PROVIDER_ID),
+        "status": str(job.get("status") or ""),
+        "status_text": status_text(str(job.get("status") or "")),
+        "finished_at": str(job.get("finished_at") or now_iso()),
+        "duration_seconds": round(duration_seconds, 2),
+        "done_chapters": int(job.get("done_chapters", 0)),
+        "successful_chapters": int(job.get("successful_chapters", 0)),
+        "failed_chapters": int(job.get("failed_chapters", 0)),
+        "saved_images": int(job.get("saved_images", 0)),
+        "error": str(job.get("error") or ""),
+        "speed_kbps": speed_kbps,
+    }
+
+
+def summarize_recent_history(state: UIState, *, hours: int = 24) -> dict[str, Any]:
+    cutoff = datetime.now() - timedelta(hours=max(1, hours))
+    recent_items: list[dict[str, Any]] = []
+    for item in state.job_history:
+        finished = parse_iso_datetime(str(item.get("finished_at", "")))
+        if finished is None or finished < cutoff:
+            continue
+        recent_items.append(item)
+
+    total = len(recent_items)
+    success = sum(1 for item in recent_items if str(item.get("status")) == "completed")
+    failed = sum(1 for item in recent_items if str(item.get("status")) == "failed")
+    cancelled = sum(1 for item in recent_items if str(item.get("status")) == "cancelled")
+    avg_speed_values = [float(item.get("speed_kbps", 0.0) or 0.0) for item in recent_items if float(item.get("speed_kbps", 0.0) or 0.0) > 0]
+    avg_speed = round(sum(avg_speed_values) / len(avg_speed_values), 2) if avg_speed_values else 0.0
+    success_rate = round((success * 100.0 / total), 1) if total else 0.0
+
+    reason_counts: dict[str, int] = {}
+    for item in recent_items:
+        if str(item.get("status") or "") != "failed":
+            continue
+        reason = str(item.get("error") or "unknown").strip() or "unknown"
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    top_reasons = sorted(reason_counts.items(), key=lambda pair: pair[1], reverse=True)[:6]
+
+    latest_items = sorted(
+        recent_items,
+        key=lambda row: str(row.get("finished_at", "")),
+        reverse=True,
+    )[:20]
+    return {
+        "hours": max(1, hours),
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "cancelled": cancelled,
+        "success_rate": success_rate,
+        "avg_speed_kbps": avg_speed,
+        "top_reasons": top_reasons,
+        "latest_items": latest_items,
+    }
+
+
+async def push_job_webhook(state: UIState, job: dict[str, Any], report: Optional[DownloadReport]) -> None:
+    status = str(job.get("status") or "")
+    if not state.webhook_enabled or not state.webhook_url or not state.webhook_event_enabled(status):
+        return
+
+    payload = {
+        "event": f"job.{status}",
+        "job_id": str(job.get("id") or ""),
+        "title": str(job.get("title") or ""),
+        "provider_id": str(job.get("provider_id") or DEFAULT_PROVIDER_ID),
+        "provider_name": provider_name(str(job.get("provider_id") or DEFAULT_PROVIDER_ID)),
+        "status": status,
+        "status_text": status_text(status),
+        "series_url": str(job.get("series_url") or ""),
+        "mode": str(job.get("mode") or ""),
+        "book_id": str(job.get("book_id") or ""),
+        "finished_at": str(job.get("finished_at") or ""),
+        "done_chapters": int(job.get("done_chapters", 0)),
+        "successful_chapters": int(job.get("successful_chapters", 0)),
+        "failed_chapters": int(job.get("failed_chapters", 0)),
+        "saved_images": int(job.get("saved_images", 0)),
+        "error": str(job.get("error") or ""),
+    }
+    if report is not None:
+        payload["downloaded_bytes"] = max(0, int(report.downloaded_bytes or 0))
+        payload["failure_reasons"] = dict(report.failure_reasons or {})
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "comic-downloader-webhook/1.0",
+    }
+    token = str(state.webhook_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = ClientTimeout(total=float(state.webhook_timeout_seconds))
+    try:
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(state.webhook_url, json=payload, headers=headers) as response:
+                if response.status >= 400:
+                    body = (await response.text())[:180]
+                    state.append_job_log(job, f"Webhook 推送失败：HTTP {response.status} {body}")
+                else:
+                    state.append_job_log(job, f"Webhook 推送成功：HTTP {response.status}")
+    except Exception as exc:
+        state.append_job_log(job, f"Webhook 推送异常：{exc}")
+
+
 def build_redirect(path: str, **params: Any) -> web.HTTPSeeOther:
     raw_msg = params.pop("msg", None)
     msg = str(raw_msg).strip() if raw_msg is not None else ""
@@ -1351,6 +1549,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
     nav_items = [
         ("dashboard", "主页", "/dashboard"),
         ("progress", "进度", "/progress"),
+        ("queue", "队列", "/queue"),
         ("bookshelf", "书架", "/bookshelf"),
         ("follow", "追更", "/follow"),
         ("health", "监控", "/health"),
@@ -2277,6 +2476,75 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
     return render_layout(title="漫画下载 - 进度", active_nav="progress", body=body, script=script)
 
 
+def render_queue(state: UIState, msg: str) -> str:
+    queued_rows: list[dict[str, Any]] = []
+    queued_jobs = queued_jobs_sorted(state)
+    for idx, job in enumerate(queued_jobs, start=1):
+        pid = str(job.get("provider_id") or DEFAULT_PROVIDER_ID)
+        queued_rows.append(
+            {
+                "id": str(job.get("id") or ""),
+                "index": idx,
+                "title": str(job.get("title") or ""),
+                "provider_badge_html": render_provider_badge(pid),
+                "created_at": fmt_time(str(job.get("created_at") or "")),
+                "can_move_up": idx > 1,
+                "can_move_down": idx < len(queued_jobs),
+            }
+        )
+
+    running_rows: list[dict[str, Any]] = []
+    for job in state.jobs.values():
+        status = str(job.get("status") or "")
+        if status not in {"running", "paused", "cancelling"}:
+            continue
+        pid = str(job.get("provider_id") or DEFAULT_PROVIDER_ID)
+        running_rows.append(
+            {
+                "id": str(job.get("id") or ""),
+                "title": str(job.get("title") or ""),
+                "provider_badge_html": render_provider_badge(pid),
+                "status": status_text(status),
+                "done_chapters": int(job.get("done_chapters", 0)),
+                "total_chapters": int(job.get("total_chapters", 0)),
+                "created_at": fmt_time(str(job.get("created_at") or "")),
+                "started_at": fmt_time(str(job.get("started_at") or "")),
+            }
+        )
+    running_rows.sort(key=lambda row: row["created_at"], reverse=True)
+
+    failed_rows: list[dict[str, Any]] = []
+    for job in state.jobs.values():
+        if str(job.get("status") or "") != "failed":
+            continue
+        pid = str(job.get("provider_id") or DEFAULT_PROVIDER_ID)
+        failed_rows.append(
+            {
+                "id": str(job.get("id") or ""),
+                "title": str(job.get("title") or ""),
+                "provider_badge_html": render_provider_badge(pid),
+                "error": str(job.get("error") or ""),
+                "finished_at": fmt_time(str(job.get("finished_at") or "")),
+            }
+        )
+    failed_rows.sort(key=lambda row: row["finished_at"], reverse=True)
+
+    body = render_template(
+        "queue.html",
+        message_html=render_message(msg),
+        summary={
+            "queued": len(queued_rows),
+            "running": len(running_rows),
+            "failed": len(failed_rows),
+            "total": len(state.jobs),
+        },
+        queued_rows=queued_rows,
+        running_rows=running_rows,
+        failed_rows=failed_rows,
+    )
+    return render_layout(title="漫画下载 - 队列", active_nav="queue", body=body)
+
+
 def normalize_cover_url(value: Any) -> str:
     cover_url = str(value or "").strip()
     if cover_url.startswith("//"):
@@ -2294,10 +2562,12 @@ def build_book_card_payload(book: dict[str, Any]) -> dict[str, Any]:
     pending = int(book.get("pending_update_count", 0))
     provider_id = str(book.get("provider_id") or DEFAULT_PROVIDER_ID)
     provider_badge = render_provider_badge(provider_id)
+    group_name = str(book.get("group") or "").strip()
     return {
         "id": str(book["id"]),
         "title": str(book.get("title") or "未命名漫画"),
         "cover_url": normalize_cover_url(book.get("cover")),
+        "group": group_name,
         "provider_badge_html": provider_badge,
         "downloaded_text": (
             f"已下载：{book.get('last_downloaded_chapter_title') or '-'} "
@@ -2307,7 +2577,10 @@ def build_book_card_payload(book: dict[str, Any]) -> dict[str, Any]:
             f"最新：{book.get('latest_site_chapter_title') or '-'} "
             f"/ #{format_chapter_number(book.get('latest_site_chapter_number'))}"
         ),
-        "summary_text": f"待更新：{pending} | 追更：{follow_text} | 检查：{fmt_time(book.get('last_checked_at', ''))}",
+        "summary_text": (
+            f"待更新：{pending} | 追更：{follow_text} | "
+            f"分组：{group_name or '未分组'} | 检查：{fmt_time(book.get('last_checked_at', ''))}"
+        ),
         "follow_enabled": follow_enabled,
     }
 
@@ -2318,6 +2591,7 @@ def render_bookshelf(
     *,
     bookshelf_page: int,
     bookshelf_page_size: int,
+    bookshelf_group: str = "",
 ) -> str:
     jm_provider = get_provider("jmcomic")
     has_jm_login = bool(state.jm_username and state.jm_password)
@@ -2325,16 +2599,30 @@ def render_bookshelf(
     jm_enabled_for_use = not jm_reason
 
     all_books = state.list_books()
-    total_books = len(all_books)
+    selected_group = str(bookshelf_group or "").strip()
+    grouped_counts: dict[str, int] = {}
+    for item in all_books:
+        key = str(item.get("group") or "").strip()
+        grouped_counts[key] = grouped_counts.get(key, 0) + 1
+
+    if selected_group:
+        filtered_books = [book for book in all_books if str(book.get("group") or "").strip() == selected_group]
+    else:
+        filtered_books = all_books
+
+    total_books = len(filtered_books)
     page_size = max(6, min(60, int(bookshelf_page_size)))
     page_count = max(1, math.ceil(total_books / page_size)) if total_books else 1
     page = max(1, min(int(bookshelf_page), page_count))
     start = (page - 1) * page_size
     end = start + page_size
-    page_books = all_books[start:end]
+    page_books = filtered_books[start:end]
 
     def bookshelf_page_url(target_page: int) -> str:
-        return f"/bookshelf?{urlencode({'bp': str(target_page), 'bps': str(page_size)})}"
+        params: dict[str, str] = {"bp": str(target_page), "bps": str(page_size)}
+        if selected_group:
+            params["bg"] = selected_group
+        return f"/bookshelf?{urlencode(params)}"
 
     books = [build_book_card_payload(book) for book in page_books]
     for book in books:
@@ -2352,7 +2640,20 @@ def render_bookshelf(
             "jm_disabled_reason": jm_reason or "未知原因",
         },
         total_books=total_books,
+        all_books_count=len(all_books),
         follow_count=sum(1 for item in all_books if bool(item.get("follow_enabled", True))),
+        group_filter={
+            "value": selected_group,
+            "options": [
+                {
+                    "value": key,
+                    "label": (key or "未分组"),
+                    "count": grouped_counts[key],
+                    "selected": key == selected_group,
+                }
+                for key in sorted(grouped_counts.keys(), key=lambda k: (k == "", k.lower()))
+            ],
+        },
         pager={
             "page": page,
             "page_count": page_count,
@@ -2434,6 +2735,13 @@ def render_health(state: UIState, msg: str) -> str:
                 "failure_reasons": top_reasons,
             }
         )
+    recent_summary = summarize_recent_history(state, hours=24)
+    recent_items = []
+    for item in recent_summary["latest_items"]:
+        row = dict(item)
+        row["provider_name"] = provider_name(str(item.get("provider_id") or DEFAULT_PROVIDER_ID))
+        row["finished_at_text"] = fmt_time(str(item.get("finished_at") or ""))
+        recent_items.append(row)
 
     body = render_template(
         "health.html",
@@ -2447,6 +2755,8 @@ def render_health(state: UIState, msg: str) -> str:
             "running": state._scheduler_running,
         },
         rows=rows,
+        recent_summary=recent_summary,
+        recent_items=recent_items,
     )
     return render_layout(title="漫画下载 - 监控", active_nav="health", body=body)
 
@@ -2505,6 +2815,13 @@ def render_settings(state: UIState, msg: str) -> str:
             "cache_enabled": state.cache_enabled,
             "jm_username": state.jm_username,
             "jm_password": state.jm_password,
+            "webhook_enabled": state.webhook_enabled,
+            "webhook_url": state.webhook_url,
+            "webhook_token": state.webhook_token,
+            "webhook_event_completed": state.webhook_event_completed,
+            "webhook_event_failed": state.webhook_event_failed,
+            "webhook_event_cancelled": state.webhook_event_cancelled,
+            "webhook_timeout_seconds": state.webhook_timeout_seconds,
             "jm_enabled": provider_enabled_for_state(state, jm_provider),
             "jm_disabled_reason": provider_disabled_reason(state, jm_provider) or "未知原因",
             "provider_switches": provider_switches,
@@ -2535,6 +2852,7 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "error": job.get("error", ""),
         "retry_file": job.get("retry_file", ""),
         "created_at": job.get("created_at", ""),
+        "queue_order": queue_order_value(job),
         "started_at": job.get("started_at", ""),
         "finished_at": job.get("finished_at", ""),
         "done_chapters": int(job.get("done_chapters", 0)),
@@ -2637,6 +2955,11 @@ async def run_download_job(state: UIState, job: dict[str, Any]) -> None:
                 state.append_job_log(job, f"刷新书架信息失败：{exc}")
             await state.save_bookshelf()
 
+    if is_job_final(str(job.get("status") or "")):
+        state.append_job_history(build_job_history_item(job=job, report=report))
+        if state.webhook_enabled and state.webhook_url and state.webhook_event_enabled(str(job.get("status") or "")):
+            asyncio.create_task(push_job_webhook(state, job, report))
+
 
 def start_job(state: UIState, job: dict[str, Any]) -> None:
     task = asyncio.create_task(run_download_job(state, job))
@@ -2685,6 +3008,132 @@ async def handle_progress(request: web.Request) -> web.Response:
     selected_job_id = request.query.get("job", "").strip() or (state.current_job_id or "")
     html = render_progress(state, msg, selected_job_id)
     return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+async def handle_queue(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    msg = pop_flash_message(request)
+    html = render_queue(state, msg)
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
+def apply_import_book_fields(book: dict[str, Any], raw: dict[str, Any]) -> None:
+    if "follow_enabled" in raw:
+        book["follow_enabled"] = parse_bool(raw.get("follow_enabled"), bool(book.get("follow_enabled", True)))
+    for key in (
+        "last_downloaded_chapter_number",
+        "last_downloaded_chapter_title",
+        "last_downloaded_chapter_url",
+        "latest_site_chapter_number",
+        "latest_site_chapter_title",
+        "latest_site_chapter_url",
+        "last_checked_at",
+        "last_update_at",
+    ):
+        if key in raw:
+            value = raw.get(key)
+            if key.endswith("_number"):
+                book[key] = parse_float(value)
+            else:
+                book[key] = normalize_url(str(value)) if key.endswith("_url") else str(value or "").strip()
+    if "pending_update_count" in raw:
+        try:
+            book["pending_update_count"] = max(0, int(raw.get("pending_update_count") or 0))
+        except Exception:
+            pass
+    if "group" in raw:
+        book["group"] = str(raw.get("group") or "").strip()
+
+
+async def handle_bookshelf_export(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    items = state.list_books()
+    payload = {
+        "exported_at": now_iso(),
+        "count": len(items),
+        "books": items,
+    }
+    filename = f"bookshelf-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return web.Response(
+        text=json.dumps(payload, ensure_ascii=False, indent=2),
+        content_type="application/json",
+        charset="utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def handle_bookshelf_import(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+    bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
+    bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    bg = str(form.get("bg", "") or "").strip()
+
+    def back(message: str) -> web.HTTPSeeOther:
+        params: dict[str, Any] = {"bp": bp, "bps": bps}
+        if bg:
+            params["bg"] = bg
+        return build_redirect("/bookshelf", msg=message, **params)
+
+    payload_text = ""
+    upload = form.get("bookshelf_file")
+    if hasattr(upload, "file"):
+        try:
+            payload_text = upload.file.read().decode("utf-8", errors="ignore")
+        except Exception:
+            payload_text = ""
+    if not payload_text:
+        payload_text = str(form.get("bookshelf_json", "") or "").strip()
+    if not payload_text:
+        raise back("请先选择要导入的 JSON 文件。")
+
+    try:
+        raw_data = json.loads(payload_text)
+    except Exception as exc:
+        raise back(f"导入失败，JSON 解析错误：{exc}")
+
+    if isinstance(raw_data, list):
+        rows = raw_data
+    elif isinstance(raw_data, dict):
+        candidate = raw_data.get("books")
+        if not isinstance(candidate, list):
+            candidate = raw_data.get("items")
+        rows = candidate if isinstance(candidate, list) else []
+    else:
+        rows = []
+    if not rows:
+        raise back("导入内容为空或格式不正确。")
+
+    created = 0
+    updated = 0
+    skipped = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        series_url = normalize_url(str(row.get("series_url") or row.get("url") or "").strip())
+        if not series_url:
+            skipped += 1
+            continue
+        provider_id = str(row.get("provider_id") or detect_provider_id_by_url(series_url) or DEFAULT_PROVIDER_ID).strip().lower()
+        title = str(row.get("title") or guess_title_from_url(series_url)).strip()
+        cover = str(row.get("cover") or "").strip()
+        group = str(row.get("group") or "").strip()
+        book, is_created = state.upsert_book(
+            provider_id=provider_id,
+            title=title,
+            series_url=series_url,
+            cover=cover,
+            group=group,
+        )
+        apply_import_book_fields(book, row)
+        if is_created:
+            created += 1
+        else:
+            updated += 1
+
+    await state.save_bookshelf()
+    raise back(f"导入完成：新增 {created} 本，更新 {updated} 本，跳过 {skipped} 条。")
 
 
 async def handle_search(request: web.Request) -> web.StreamResponse:
@@ -2915,11 +3364,13 @@ async def handle_bookshelf(request: web.Request) -> web.Response:
     msg = pop_flash_message(request)
     bookshelf_page = parse_int(request.query.get("bp", "1"), 1, minimum=1, maximum=999)
     bookshelf_page_size = parse_int(request.query.get("bps", "24"), 24, minimum=6, maximum=60)
+    bookshelf_group = str(request.query.get("bg", "") or "").strip()
     html = render_bookshelf(
         state,
         msg,
         bookshelf_page=bookshelf_page,
         bookshelf_page_size=bookshelf_page_size,
+        bookshelf_group=bookshelf_group,
     )
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
@@ -2951,10 +3402,17 @@ async def handle_bookshelf_jm_login(request: web.Request) -> web.StreamResponse:
     form = await request.post()
     bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
     bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    bg = str(form.get("bg", "") or "").strip()
+
+    def back(message: str) -> web.HTTPSeeOther:
+        params: dict[str, Any] = {"bp": bp, "bps": bps}
+        if bg:
+            params["bg"] = bg
+        return build_redirect("/bookshelf", msg=message, **params)
 
     reason = provider_disabled_reason(state, provider)
     if reason:
-        raise build_redirect("/bookshelf", msg=f"JM 不可用：{reason}", bp=bp, bps=bps)
+        raise back(f"JM 不可用：{reason}")
 
     if not state.jm_username or not state.jm_password:
         raise build_redirect("/settings", msg="请先填写 JM 用户名和密码，再手动登录。")
@@ -2972,11 +3430,11 @@ async def handle_bookshelf_jm_login(request: web.Request) -> web.StreamResponse:
     except Exception as exc:
         state.jm_manual_logged_in = False
         state.jm_manual_login_user = ""
-        raise build_redirect("/bookshelf", msg=f"JM 手动登录失败：{exc}", bp=bp, bps=bps)
+        raise back(f"JM 手动登录失败：{exc}")
 
     state.jm_manual_logged_in = True
     state.jm_manual_login_user = login_user
-    raise build_redirect("/bookshelf", msg=f"JM 手动登录成功：{login_user}", bp=bp, bps=bps)
+    raise back(f"JM 手动登录成功：{login_user}")
 
 
 async def handle_bookshelf_jm_logout(request: web.Request) -> web.StreamResponse:
@@ -2984,6 +3442,13 @@ async def handle_bookshelf_jm_logout(request: web.Request) -> web.StreamResponse
     form = await request.post()
     bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
     bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    bg = str(form.get("bg", "") or "").strip()
+
+    def back(message: str) -> web.HTTPSeeOther:
+        params: dict[str, Any] = {"bp": bp, "bps": bps}
+        if bg:
+            params["bg"] = bg
+        return build_redirect("/bookshelf", msg=message, **params)
 
     try:
         await manual_logout_jm(
@@ -3001,7 +3466,7 @@ async def handle_bookshelf_jm_logout(request: web.Request) -> web.StreamResponse
 
     state.jm_manual_logged_in = False
     state.jm_manual_login_user = ""
-    raise build_redirect("/bookshelf", msg="JM 已退出手动登录状态。", bp=bp, bps=bps)
+    raise back("JM 已退出手动登录状态。")
 
 
 async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.StreamResponse:
@@ -3010,10 +3475,17 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
     form = await request.post()
     bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
     bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    bg = str(form.get("bg", "") or "").strip()
+
+    def back(message: str) -> web.HTTPSeeOther:
+        params: dict[str, Any] = {"bp": bp, "bps": bps}
+        if bg:
+            params["bg"] = bg
+        return build_redirect("/bookshelf", msg=message, **params)
 
     reason = provider_disabled_reason(state, provider)
     if reason:
-        raise build_redirect("/bookshelf", msg=f"JM 不可用：{reason}", bp=bp, bps=bps)
+        raise back(f"JM 不可用：{reason}")
 
     if not state.jm_username or not state.jm_password:
         raise build_redirect("/settings", msg="请先填写 JM 用户名和密码，再同步收藏。")
@@ -3029,7 +3501,7 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
             jm_password=state.jm_password,
         )
     except Exception as exc:
-        raise build_redirect("/bookshelf", msg=f"同步 JM 收藏失败：{exc}", bp=bp, bps=bps)
+        raise back(f"同步 JM 收藏失败：{exc}")
 
     created = 0
     updated = 0
@@ -3046,12 +3518,173 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
             updated += 1
 
     await state.save_bookshelf()
-    raise build_redirect(
-        "/bookshelf",
-        msg=f"JM 收藏同步完成：共 {len(favorites)} 条，新增 {created}，更新 {updated}。",
-        bp=bp,
-        bps=bps,
+    raise back(f"JM 收藏同步完成：共 {len(favorites)} 条，新增 {created}，更新 {updated}。")
+
+
+async def enqueue_book_updates_job(
+    state: UIState,
+    book: dict[str, Any],
+    *,
+    source_message: str = "",
+) -> tuple[bool, str]:
+    try:
+        _, chapters = await fetch_series_snapshot(
+            state,
+            str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
+            str(book.get("series_url") or ""),
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    pending = compute_pending_chapters(book, chapters)
+    set_site_latest_fields(book, chapters)
+    book["pending_update_count"] = len(pending)
+    book["last_checked_at"] = now_iso()
+
+    if not pending:
+        return False, ""
+
+    chapter_urls = [item.url for item in pending]
+    title = f"下载更新：{book.get('title') or '未命名漫画'} ({len(chapter_urls)} 章)"
+    job = state.create_job(
+        title=title,
+        series_url=str(book.get("series_url") or ""),
+        chapter_selector="all",
+        chapter_urls=chapter_urls,
+        mode="download_updates",
+        book_id=str(book.get("id") or ""),
+        provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
     )
+    if source_message:
+        state.append_job_log(job, source_message)
+    return True, str(job.get("id") or "")
+
+
+def create_retry_job_from_failed(state: UIState, failed_job: dict[str, Any]) -> Optional[dict[str, Any]]:
+    status = str(failed_job.get("status") or "")
+    if status not in {"failed", "cancelled"}:
+        return None
+    job = state.create_job(
+        title=f"重试：{str(failed_job.get('title') or '下载任务')}",
+        series_url=str(failed_job.get("series_url") or ""),
+        chapter_selector=str(failed_job.get("chapter_selector") or "all"),
+        chapter_urls=[str(item) for item in list(failed_job.get("chapter_urls") or []) if str(item).strip()],
+        mode=str(failed_job.get("mode") or "download_all"),
+        book_id=str(failed_job.get("book_id") or ""),
+        provider_id=str(failed_job.get("provider_id") or DEFAULT_PROVIDER_ID),
+    )
+    state.append_job_log(job, f"由失败任务 {failed_job.get('id')} 重试创建。")
+    return job
+
+
+async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+    page = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
+    page_size = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    group_filter = str(form.get("bg", "") or "").strip()
+    bulk_action = str(form.get("bulk_action", "")).strip().lower()
+
+    raw_ids: list[str] = []
+    if hasattr(form, "getall"):
+        raw_ids = [str(v).strip() for v in form.getall("book_ids") if str(v).strip()]
+    selected_ids = list(dict.fromkeys(raw_ids))
+
+    def back_redirect(message: str) -> web.HTTPSeeOther:
+        params: dict[str, Any] = {"bp": page, "bps": page_size}
+        if group_filter:
+            params["bg"] = group_filter
+        return build_redirect("/bookshelf", msg=message, **params)
+
+    if not selected_ids:
+        raise back_redirect("请先选择至少一本漫画。")
+
+    selected_books: list[dict[str, Any]] = []
+    for book_id in selected_ids:
+        book = state.get_book(book_id)
+        if book is not None:
+            selected_books.append(book)
+    if not selected_books:
+        raise back_redirect("所选项目不存在或已被移除。")
+
+    if bulk_action == "bulk_enable_follow":
+        changed = 0
+        for book in selected_books:
+            if not bool(book.get("follow_enabled", True)):
+                book["follow_enabled"] = True
+                changed += 1
+        await state.save_bookshelf()
+        if changed:
+            raise back_redirect(f"已为 {changed} 本漫画开启追更。")
+        raise back_redirect("所选漫画已全部开启追更。")
+
+    if bulk_action == "bulk_follow_download":
+        enabled_changed = 0
+        queued = 0
+        unchanged = 0
+        failed_titles: list[str] = []
+        last_job_id = ""
+        for book in selected_books:
+            if not bool(book.get("follow_enabled", True)):
+                book["follow_enabled"] = True
+                enabled_changed += 1
+            created, detail = await enqueue_book_updates_job(
+                state,
+                book,
+                source_message="由书架批量追更下载创建。",
+            )
+            if created:
+                queued += 1
+                last_job_id = detail
+            elif detail:
+                failed_titles.append(f"{book.get('title') or '未命名漫画'}：{detail}")
+            else:
+                unchanged += 1
+        await state.save_bookshelf()
+        dispatch_jobs(state)
+
+        msg = f"批量追更完成：入队 {queued} 本，无更新 {unchanged} 本"
+        if enabled_changed:
+            msg += f"，并开启追更 {enabled_changed} 本"
+        if failed_titles:
+            msg += f"，失败 {len(failed_titles)} 本"
+        msg += "。"
+
+        if queued and last_job_id:
+            raise build_redirect("/progress", msg=msg, job=last_job_id)
+        raise back_redirect(msg)
+
+    if bulk_action == "bulk_download_all":
+        queued = 0
+        last_job_id = ""
+        for book in selected_books:
+            title = f"下载全部：{book.get('title') or '未命名漫画'}"
+            job = state.create_job(
+                title=title,
+                series_url=str(book.get("series_url") or ""),
+                chapter_selector="all",
+                chapter_urls=[],
+                mode="download_all",
+                book_id=str(book.get("id") or ""),
+                provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
+            )
+            queued += 1
+            last_job_id = str(job["id"])
+        dispatch_jobs(state)
+        if last_job_id:
+            raise build_redirect("/progress", msg=f"已为 {queued} 本漫画创建下载任务。", job=last_job_id)
+        raise back_redirect("未能创建下载任务，请稍后重试。")
+
+    if bulk_action == "bulk_set_group":
+        group_name = str(form.get("bulk_group_name", "") or "").strip()
+        for book in selected_books:
+            book["group"] = group_name
+        await state.save_bookshelf()
+        if group_name:
+            raise back_redirect(f"已将 {len(selected_books)} 本漫画设置到分组：{group_name}。")
+        raise back_redirect(f"已将 {len(selected_books)} 本漫画设为未分组。")
+
+    raise back_redirect("未知批量操作。")
 
 
 async def handle_book_action(request: web.Request) -> web.StreamResponse:
@@ -3066,8 +3699,11 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
     else:
         page = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
         page_size = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+        group_filter = str(form.get("bg", "") or "").strip()
         back_path = "/bookshelf"
         back_params = {"bp": page, "bps": page_size}
+        if group_filter:
+            back_params["bg"] = group_filter
 
     def back_redirect(message: str) -> web.HTTPSeeOther:
         return build_redirect(back_path, msg=message, **back_params)
@@ -3189,6 +3825,18 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
         state.jm_password = str(form.get("jm_password", state.jm_password)).strip()
         state.jm_manual_logged_in = False
         state.jm_manual_login_user = ""
+        state.webhook_enabled = str(form.get("webhook_enabled", "0")).strip() == "1"
+        state.webhook_url = str(form.get("webhook_url", state.webhook_url)).strip()
+        state.webhook_token = str(form.get("webhook_token", state.webhook_token)).strip()
+        state.webhook_event_completed = str(form.get("webhook_event_completed", "1")).strip() == "1"
+        state.webhook_event_failed = str(form.get("webhook_event_failed", "1")).strip() == "1"
+        state.webhook_event_cancelled = str(form.get("webhook_event_cancelled", "0")).strip() == "1"
+        state.webhook_timeout_seconds = parse_int(
+            form.get("webhook_timeout_seconds", state.webhook_timeout_seconds),
+            state.webhook_timeout_seconds,
+            minimum=3,
+            maximum=30,
+        )
         enabled_values = []
         if hasattr(form, "getall"):
             enabled_values = [str(v).strip().lower() for v in form.getall("enabled_providers") if str(v).strip()]
@@ -3198,6 +3846,120 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
     except Exception as exc:
         raise build_redirect("/settings", msg=f"保存失败：{exc}")
     raise build_redirect("/settings", msg="设置已保存。")
+
+
+def cancel_job(state: UIState, job: dict[str, Any]) -> bool:
+    status = str(job.get("status") or "")
+    if status not in {"queued", "running", "paused", "cancelling"}:
+        return False
+
+    job["cancel_requested"] = True
+    job["pause_event"].set()
+    task = job.get("task")
+    if task is None:
+        job["status"] = "cancelled"
+        job["finished_at"] = now_iso()
+        state.append_job_log(job, "排队任务已取消。")
+        state.append_job_history(build_job_history_item(job=job, report=None))
+        if state.webhook_enabled and state.webhook_url and state.webhook_event_enabled("cancelled"):
+            asyncio.create_task(push_job_webhook(state, job, None))
+    else:
+        job["status"] = "cancelling"
+        state.append_job_log(job, "收到取消请求，正在停止任务。")
+        if not task.done():
+            task.cancel()
+    return True
+
+
+async def handle_queue_action(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+    action = str(form.get("action", "") or "").strip().lower()
+
+    selected_ids = list(dict.fromkeys(form_getall_str(form, "job_ids")))
+    move_job_id = str(form.get("job_id", "") or "").strip()
+
+    if action in {"move_up", "move_down"}:
+        job = state.jobs.get(move_job_id)
+        if job is None or str(job.get("status") or "") != "queued":
+            raise build_redirect("/queue", msg="只能调整排队中的任务。")
+        queued = queued_jobs_sorted(state)
+        idx = next((i for i, row in enumerate(queued) if str(row.get("id") or "") == move_job_id), -1)
+        if idx < 0:
+            raise build_redirect("/queue", msg="任务不存在。")
+        target_idx = idx - 1 if action == "move_up" else idx + 1
+        if target_idx < 0 or target_idx >= len(queued):
+            raise build_redirect("/queue", msg="已到边界，无法继续移动。")
+        current = queued[idx]
+        target = queued[target_idx]
+        current_order = queue_order_value(current)
+        target_order = queue_order_value(target)
+        current["queue_order"] = target_order
+        target["queue_order"] = current_order
+        normalize_queue_orders(state)
+        dispatch_jobs(state)
+        raise build_redirect("/queue", msg="队列顺序已更新。")
+
+    if action == "cancel_selected":
+        if not selected_ids:
+            raise build_redirect("/queue", msg="请先勾选任务。")
+        cancelled = 0
+        for job_id in selected_ids:
+            job = state.jobs.get(job_id)
+            if job is None:
+                continue
+            if cancel_job(state, job):
+                cancelled += 1
+        dispatch_jobs(state)
+        raise build_redirect("/queue", msg=f"已处理取消请求 {cancelled} 个任务。")
+
+    if action in {"retry_failed", "retry_all_failed"}:
+        target_ids = selected_ids
+        if action == "retry_all_failed":
+            target_ids = [
+                str(job.get("id") or "")
+                for job in state.jobs.values()
+                if str(job.get("status") or "") in {"failed", "cancelled"}
+            ]
+        if not target_ids:
+            raise build_redirect("/queue", msg="没有可重试的失败任务。")
+        retried = 0
+        last_job_id = ""
+        for job_id in target_ids:
+            failed_job = state.jobs.get(job_id)
+            if failed_job is None:
+                continue
+            new_job = create_retry_job_from_failed(state, failed_job)
+            if new_job is None:
+                continue
+            retried += 1
+            last_job_id = str(new_job.get("id") or "")
+        dispatch_jobs(state)
+        if retried and last_job_id:
+            raise build_redirect("/progress", msg=f"已重试 {retried} 个任务。", job=last_job_id)
+        raise build_redirect("/queue", msg="没有可重试的失败任务。")
+
+    if action == "remove_finished":
+        removed = 0
+        target_ids = selected_ids
+        if not target_ids:
+            target_ids = [
+                str(job.get("id") or "")
+                for job in state.jobs.values()
+                if is_job_final(str(job.get("status") or ""))
+            ]
+        for job_id in target_ids:
+            job = state.jobs.get(job_id)
+            if job is None:
+                continue
+            if is_job_final(str(job.get("status") or "")):
+                state.jobs.pop(job_id, None)
+                removed += 1
+        if state.current_job_id and state.current_job_id not in state.jobs:
+            state.current_job_id = ""
+        raise build_redirect("/queue", msg=f"已移除 {removed} 个已结束任务。")
+
+    raise build_redirect("/queue", msg="未知队列操作。")
 
 
 async def handle_job_state(request: web.Request) -> web.Response:
@@ -3226,19 +3988,8 @@ async def handle_job_action(request: web.Request) -> web.Response:
         job["pause_event"].set()
         job["status"] = "running"
         state.append_job_log(job, "任务继续执行。")
-    elif action == "cancel" and status in {"queued", "running", "paused", "cancelling"}:
-        job["cancel_requested"] = True
-        job["pause_event"].set()
-        task = job.get("task")
-        if task is None:
-            job["status"] = "cancelled"
-            job["finished_at"] = now_iso()
-            state.append_job_log(job, "排队任务已取消。")
-        else:
-            job["status"] = "cancelling"
-            state.append_job_log(job, "收到取消请求，正在停止任务。")
-        if task is not None and not task.done():
-            task.cancel()
+    elif action == "cancel":
+        cancel_job(state, job)
     dispatch_jobs(state)
 
     return web.json_response({"ok": True, "state": serialize_job(job)})
@@ -3308,15 +4059,20 @@ def create_app() -> web.Application:
             web.get("/", handle_root),
             web.get("/dashboard", handle_dashboard),
             web.get("/progress", handle_progress),
+            web.get("/queue", handle_queue),
+            web.post("/queue/action", handle_queue_action),
             web.post("/search", handle_search),
             web.post("/search/action", handle_search_action),
             web.post("/dashboard/import", handle_batch_import),
             web.get("/bookshelf", handle_bookshelf),
+            web.get("/bookshelf/export", handle_bookshelf_export),
+            web.post("/bookshelf/import", handle_bookshelf_import),
             web.post("/bookshelf/jm-login", handle_bookshelf_jm_login),
             web.post("/bookshelf/jm-logout", handle_bookshelf_jm_logout),
             web.get("/follow", handle_follow),
             web.get("/health", handle_health),
             web.post("/bookshelf/sync-jm-favorites", handle_bookshelf_sync_jm_favorites),
+            web.post("/bookshelf/bulk", handle_bookshelf_bulk),
             web.post("/bookshelf/{book_id}/{action}", handle_book_action),
             web.get("/settings", handle_settings_get),
             web.post("/settings", handle_settings_post),

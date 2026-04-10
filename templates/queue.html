@@ -1,0 +1,136 @@
+{{ message_html | safe }}
+
+<div class="panel">
+  <h2 class="title">任务队列</h2>
+  <div class="grid">
+    <div class="stat-card">
+      <div class="stat-label">排队中</div>
+      <div class="stat-value">{{ summary.queued }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">进行中</div>
+      <div class="stat-value">{{ summary.running }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">失败任务</div>
+      <div class="stat-value">{{ summary.failed }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">总任务数</div>
+      <div class="stat-value">{{ summary.total }}</div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+    <form method="post" action="/queue/action" style="margin:0;">
+      <input type="hidden" name="action" value="retry_all_failed" />
+      <button class="btn secondary" type="submit">重试全部失败任务</button>
+    </form>
+    <form method="post" action="/queue/action" onsubmit="return confirm('确认清理所有已结束任务？');" style="margin:0;">
+      <input type="hidden" name="action" value="remove_finished" />
+      <button class="btn ghost" type="submit">清理全部已结束任务</button>
+    </form>
+  </div>
+</div>
+
+<form id="queue-bulk-form" method="post" action="/queue/action" style="display:none;"></form>
+
+<div class="panel">
+  <h2 class="title">排队中任务</h2>
+  {% if queued_rows %}
+  <div class="bookshelf-grid">
+    {% for row in queued_rows %}
+    <div class="book-card" style="min-height:260px;">
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+        <input type="checkbox" name="job_ids" value="{{ row.id }}" form="queue-bulk-form" />
+        选择
+      </label>
+      <h3 class="book-title" title="{{ row.title }}">{{ row.title }}</h3>
+      <div class="book-meta-list">
+        <div class="book-meta">{{ row.provider_badge_html | safe }}</div>
+        <div class="book-meta">队列顺位：{{ row.index }}</div>
+        <div class="book-meta">创建时间：{{ row.created_at }}</div>
+      </div>
+      <div class="book-actions">
+        <form method="post" action="/queue/action">
+          <input type="hidden" name="action" value="move_up" />
+          <input type="hidden" name="job_id" value="{{ row.id }}" />
+          <button class="btn ghost" type="submit"{% if not row.can_move_up %} disabled{% endif %}>上移</button>
+        </form>
+        <form method="post" action="/queue/action">
+          <input type="hidden" name="action" value="move_down" />
+          <input type="hidden" name="job_id" value="{{ row.id }}" />
+          <button class="btn ghost" type="submit"{% if not row.can_move_down %} disabled{% endif %}>下移</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+    <button class="btn warn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected">批量取消</button>
+  </div>
+  {% else %}
+  <div class="subtle">当前没有排队中的任务。</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2 class="title">进行中任务</h2>
+  {% if running_rows %}
+  <div class="bookshelf-grid">
+    {% for row in running_rows %}
+    <div class="book-card" style="min-height:220px;">
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+        <input type="checkbox" name="job_ids" value="{{ row.id }}" form="queue-bulk-form" />
+        选择
+      </label>
+      <h3 class="book-title" title="{{ row.title }}">{{ row.title }}</h3>
+      <div class="book-meta-list">
+        <div class="book-meta">{{ row.provider_badge_html | safe }}</div>
+        <div class="book-meta">状态：{{ row.status }}</div>
+        <div class="book-meta">章节：{{ row.done_chapters }}/{{ row.total_chapters }}</div>
+        <div class="book-meta">开始：{{ row.started_at }}</div>
+      </div>
+      <div style="margin-top:auto;">
+        <a class="btn ghost" href="/progress?job={{ row.id }}">查看进度</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+    <button class="btn warn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected">批量取消</button>
+  </div>
+  {% else %}
+  <div class="subtle">当前没有进行中的任务。</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2 class="title">失败任务</h2>
+  {% if failed_rows %}
+  <div class="bookshelf-grid">
+    {% for row in failed_rows %}
+    <div class="book-card" style="min-height:250px;">
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+        <input type="checkbox" name="job_ids" value="{{ row.id }}" form="queue-bulk-form" />
+        选择
+      </label>
+      <h3 class="book-title" title="{{ row.title }}">{{ row.title }}</h3>
+      <div class="book-meta-list">
+        <div class="book-meta">{{ row.provider_badge_html | safe }}</div>
+        <div class="book-meta">完成时间：{{ row.finished_at }}</div>
+        <div class="book-meta clamp-1" title="{{ row.error }}">错误：{{ row.error or '未知错误' }}</div>
+      </div>
+      <div style="margin-top:auto;">
+        <a class="btn ghost" href="/progress?job={{ row.id }}">查看日志</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+    <button class="btn secondary" type="submit" form="queue-bulk-form" name="action" value="retry_failed">重试选中失败任务</button>
+    <button class="btn ghost" type="submit" form="queue-bulk-form" name="action" value="remove_finished" onclick="return confirm('确认移除选中的已结束任务？');">移除选中已结束任务</button>
+  </div>
+  {% else %}
+  <div class="subtle">当前没有失败任务。</div>
+  {% endif %}
+</div>

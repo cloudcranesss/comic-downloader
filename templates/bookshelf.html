@@ -23,16 +23,19 @@
     <form method="post" action="/bookshelf/jm-login" style="margin:0;">
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
       <button class="btn ghost" type="submit">手动登录</button>
     </form>
     <form method="post" action="/bookshelf/jm-logout" style="margin:0;">
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
       <button class="btn ghost" type="submit"{% if not sync.manual_logged_in %} disabled{% endif %}>退出登录</button>
     </form>
     <form method="post" action="/bookshelf/sync-jm-favorites" style="margin:0;">
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
       <button class="btn secondary" type="submit">同步 JM 收藏到书架</button>
     </form>
   </div>
@@ -49,20 +52,68 @@
 <div class="panel">
   <h2 class="title">书架管理</h2>
   <div class="subtle" style="margin-bottom:8px;">
-    共 {{ total_books }} 本漫画，已开启追更 {{ follow_count }} 本。
+    当前展示 {{ total_books }} 本漫画（书架总计 {{ all_books_count }} 本），已开启追更 {{ follow_count }} 本。
     更新检查与增量下载请前往 <a class="btn ghost" href="/follow">追更页</a>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 10px;">
+    <form class="pager-form" method="get" action="/bookshelf">
+      <label style="margin:0;color:var(--muted);">分组</label>
+      <select class="select" style="width:160px;min-width:160px;" name="bg" onchange="this.form.submit()">
+        <option value="">全部分组</option>
+        {% for opt in group_filter.options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }} ({{ opt.count }})</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="bp" value="1" />
+      <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+    </form>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <a class="btn ghost" href="/bookshelf/export">导出书架</a>
+      <form method="post" action="/bookshelf/import" enctype="multipart/form-data" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
+        <input type="hidden" name="bp" value="{{ pager.page }}" />
+        <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+        <input type="hidden" name="bg" value="{{ group_filter.value }}" />
+        <input class="input" type="file" name="bookshelf_file" accept=".json,application/json" style="max-width:220px;min-height:38px;padding:6px 10px;" />
+        <button class="btn ghost" type="submit">导入书架</button>
+      </form>
+    </div>
+  </div>
+  <form id="bulk-form" method="post" action="/bookshelf/bulk" style="display:none;">
+    <input type="hidden" name="bp" value="{{ pager.page }}" />
+    <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+    <input type="hidden" name="bg" value="{{ group_filter.value }}" />
+  </form>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="btn ghost" type="button" id="bulk-select-all">全选</button>
+      <button class="btn ghost" type="button" id="bulk-select-invert">反选</button>
+      <button class="btn ghost" type="button" id="bulk-select-clear">清空</button>
+      <span class="subtle">已选择 <span id="bulk-selected-count">0</span> 本</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_download_all">一键下载</button>
+      <button class="btn secondary" type="submit" form="bulk-form" name="bulk_action" value="bulk_follow_download">一键追更下载</button>
+      <button class="btn ghost" type="submit" form="bulk-form" name="bulk_action" value="bulk_enable_follow">仅开启追更</button>
+      <input class="input" name="bulk_group_name" form="bulk-form" placeholder="分组名（留空=未分组）" style="width:180px;min-width:180px;min-height:38px;" />
+      <button class="btn ghost" type="submit" form="bulk-form" name="bulk_action" value="bulk_set_group">批量分组</button>
+    </div>
   </div>
 
   <div class="bookshelf-grid">
     {% if books %}
     {% for book in books %}
     <div class="book-card">
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+        <input class="bulk-book-check" type="checkbox" name="book_ids" value="{{ book.id }}" form="bulk-form" />
+        选择
+      </label>
       {% if book.cover_url %}
       <div class="result-cover-wrap"><img class="result-cover" src="{{ book.cover_url }}" alt="{{ book.title }}" loading="lazy" /></div>
       {% else %}
       <div class="result-cover-wrap"><div class="result-cover-empty">暂无封面</div></div>
       {% endif %}
       <h3 class="book-title" title="{{ book.title }}">{{ book.title }}</h3>
+      <div class="book-meta">分组：{{ book.group or '未分组' }}</div>
       <div class="book-meta-list">
         <div class="book-meta">{{ book.provider_badge_html | safe }}</div>
         <div class="book-meta clamp-1" title="{{ book.downloaded_text }}">{{ book.downloaded_text }}</div>
@@ -74,18 +125,21 @@
           <input type="hidden" name="src" value="bookshelf" />
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <input type="hidden" name="bg" value="{{ group_filter.value }}" />
           <button class="btn" type="submit">全部</button>
         </form>
         <form method="post" action="/bookshelf/{{ book.id }}/toggle_follow">
           <input type="hidden" name="src" value="bookshelf" />
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <input type="hidden" name="bg" value="{{ group_filter.value }}" />
           <button class="btn secondary" type="submit">{{ book.follow_button_text }}</button>
         </form>
         <form method="post" action="/bookshelf/{{ book.id }}/remove" onsubmit="return confirm('确认从书架移除？');">
           <input type="hidden" name="src" value="bookshelf" />
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <input type="hidden" name="bg" value="{{ group_filter.value }}" />
           <button class="btn warn" type="submit">移除</button>
         </form>
       </div>
@@ -105,6 +159,7 @@
         {% endfor %}
       </select>
       <input type="hidden" name="bp" value="1" />
+      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
     </form>
     <div class="pager-links">
       {% if pager.has_prev %}
@@ -121,3 +176,31 @@
     </div>
   </div>
 </div>
+<script>
+  (function () {
+    const checks = Array.from(document.querySelectorAll('.bulk-book-check'));
+    const countEl = document.getElementById('bulk-selected-count');
+    const btnAll = document.getElementById('bulk-select-all');
+    const btnInvert = document.getElementById('bulk-select-invert');
+    const btnClear = document.getElementById('bulk-select-clear');
+    const bulkForm = document.getElementById('bulk-form');
+    if (!countEl || !bulkForm) return;
+
+    function updateCount() {
+      const selected = checks.filter((item) => item.checked).length;
+      countEl.textContent = String(selected);
+    }
+
+    checks.forEach((item) => item.addEventListener('change', updateCount));
+    if (btnAll) btnAll.addEventListener('click', function () { checks.forEach((item) => { item.checked = true; }); updateCount(); });
+    if (btnInvert) btnInvert.addEventListener('click', function () { checks.forEach((item) => { item.checked = !item.checked; }); updateCount(); });
+    if (btnClear) btnClear.addEventListener('click', function () { checks.forEach((item) => { item.checked = false; }); updateCount(); });
+    bulkForm.addEventListener('submit', function (event) {
+      if (!checks.some((item) => item.checked)) {
+        event.preventDefault();
+        alert('请先选择至少一本漫画。');
+      }
+    });
+    updateCount();
+  })();
+</script>

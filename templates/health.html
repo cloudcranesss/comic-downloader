@@ -17,6 +17,38 @@
 </div>
 
 <div class="panel">
+  <h2 class="title">近 {{ recent_summary.hours }} 小时下载统计</h2>
+  <div class="grid">
+    <div class="stat-card">
+      <div class="stat-label">任务总数</div>
+      <div class="stat-value">{{ recent_summary.total }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">成功 / 失败 / 取消</div>
+      <div class="stat-value">{{ recent_summary.success }} / {{ recent_summary.failed }} / {{ recent_summary.cancelled }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">成功率</div>
+      <div class="stat-value">{{ recent_summary.success_rate }}%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">平均速度</div>
+      <div class="stat-value">{{ recent_summary.avg_speed_kbps }} KB/s</div>
+    </div>
+  </div>
+  <div class="subtle" style="margin-top:8px;">失败原因 Top：</div>
+  {% if recent_summary.top_reasons %}
+  <div class="subtle">
+    {% for reason, count in recent_summary.top_reasons %}
+    <div>{{ reason }} × {{ count }}</div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="subtle">暂无</div>
+  {% endif %}
+</div>
+
+<div class="panel">
   <h2 class="title">站点健康监控</h2>
   <div class="subtle" style="margin-bottom:10px;">展示站点可用性、平均下载速度与失败原因分布。</div>
   <div class="grid">
@@ -47,4 +79,29 @@
     </div>
     {% endfor %}
   </div>
+</div>
+
+<div class="panel">
+  <h2 class="title">最近任务记录</h2>
+  {% if recent_items %}
+  <div class="grid">
+    {% for row in recent_items %}
+    <div class="stat-card">
+      <div class="stat-label">{{ row.provider_name }} | {{ row.status_text }}</div>
+      <div class="book-meta clamp-1" title="{{ row.title }}">{{ row.title }}</div>
+      <div class="subtle" style="margin-top:6px;">完成：{{ row.finished_at_text }}</div>
+      <div class="subtle">章节：{{ row.successful_chapters }} 成功 / {{ row.failed_chapters }} 失败</div>
+      <div class="subtle">图片：{{ row.saved_images }} | 速度：{{ row.speed_kbps }} KB/s</div>
+      {% if row.error %}
+      <div class="subtle clamp-1" style="margin-top:4px;color:#b91c1c;" title="{{ row.error }}">错误：{{ row.error }}</div>
+      {% endif %}
+      <div style="margin-top:8px;">
+        <a class="btn ghost" href="/progress?job={{ row.job_id }}">查看详情</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="subtle">暂无近期任务记录。</div>
+  {% endif %}
 </div>

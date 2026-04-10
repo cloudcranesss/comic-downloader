@@ -19,6 +19,7 @@
       <h3 class="book-title" title="{{ book.title }}">{{ book.title }}</h3>
       <div class="book-meta-list">
         <div class="book-meta">{{ book.provider_badge_html | safe }}</div>
+        <div class="book-meta">分组：{{ book.group or '未分组' }}</div>
         <div class="book-meta clamp-1" title="{{ book.downloaded_text }}">{{ book.downloaded_text }}</div>
         <div class="book-meta clamp-1" title="{{ book.latest_text }}">{{ book.latest_text }}</div>
         <div class="book-meta clamp-1" title="{{ book.summary_text }}">{{ book.summary_text }}</div>
