@@ -20,5 +20,4 @@ RUN mkdir -p /app/downloads
 
 EXPOSE 8000
 
-CMD ["python", "toonily_webui.py", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]

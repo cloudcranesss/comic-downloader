@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from toonily_async_downloader import (
+from downloaders.toonily import (
     Chapter,
     ChapterResult,
     DownloadReport,

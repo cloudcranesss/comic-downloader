@@ -562,7 +562,7 @@ class ToonilyAsyncDownloader:
             "# Toonily failed chapters retry list",
             f"# generated_at: {datetime.now().isoformat(timespec='seconds')}",
             f"# series_url: {self.series_url}",
-            "# usage: python toonily_async_downloader.py <series_url> --retry-file <this_file>",
+            "# usage: python downloaders/toonily.py <series_url> --retry-file <this_file>",
             "",
         ]
 

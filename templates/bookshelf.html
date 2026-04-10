@@ -1,0 +1,126 @@
+{{ message_html | safe }}
+
+<div class="panel">
+  <h2 class="title">JM 收藏同步</h2>
+  {% if sync.jm_enabled %}
+  <div class="subtle" style="margin-bottom:8px;">
+    {% if sync.has_jm_login %}
+    JM 登录已配置：{{ sync.jm_username }}
+    {% else %}
+    JM 登录未配置，请先到设置页填写用户名和密码。
+    {% endif %}
+  </div>
+  {% if sync.has_jm_login %}
+  <form method="post" action="/bookshelf/sync-jm-favorites">
+    <input type="hidden" name="bp" value="{{ pager.page }}" />
+    <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+    <button class="btn secondary" type="submit">同步 JM 收藏到书架</button>
+  </form>
+  {% else %}
+  <a class="btn ghost" href="/settings">去设置 JM 账号</a>
+  {% endif %}
+  {% else %}
+  <div class="subtle" style="margin-bottom:8px;color:#fecaca;">JM 功能不可用：{{ sync.jm_disabled_reason }}</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2 class="title">书架管理</h2>
+  <div class="subtle" style="margin-bottom:8px;">
+    共 {{ total_books }} 本漫画，已开启追更 {{ follow_count }} 本。
+    更新检查与增量下载请前往 <a class="btn ghost" style="padding:4px 10px;margin-left:6px;" href="/follow">追更页</a>
+  </div>
+
+  <div class="pager">
+    <form class="pager-form" method="get" action="/bookshelf">
+      <label style="margin:0;color:var(--muted);">每页</label>
+      <select class="select" style="width:96px;min-width:96px;" name="bps" onchange="this.form.submit()">
+        {% for opt in pager.page_size_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="bp" value="1" />
+    </form>
+    <div class="pager-links">
+      {% if pager.has_prev %}
+      <a class="btn ghost" href="{{ pager.prev_url }}">上一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>上一页</button>
+      {% endif %}
+      <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
+      {% if pager.has_next %}
+      <a class="btn ghost" href="{{ pager.next_url }}">下一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>下一页</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="bookshelf-grid">
+    {% if books %}
+    {% for book in books %}
+    <div class="book-card">
+      {% if book.cover_url %}
+      <div class="result-cover-wrap"><img class="result-cover" src="{{ book.cover_url }}" alt="{{ book.title }}" loading="lazy" /></div>
+      {% else %}
+      <div class="result-cover-wrap"><div class="result-cover-empty">暂无封面</div></div>
+      {% endif %}
+      <h3 class="book-title" title="{{ book.title }}">{{ book.title }}</h3>
+      <div class="book-meta-list">
+        <div class="book-meta">{{ book.provider_badge_html | safe }}</div>
+        <div class="book-meta clamp-1" title="{{ book.downloaded_text }}">{{ book.downloaded_text }}</div>
+        <div class="book-meta clamp-1" title="{{ book.latest_text }}">{{ book.latest_text }}</div>
+        <div class="book-meta clamp-1" title="{{ book.summary_text }}">{{ book.summary_text }}</div>
+      </div>
+      <div class="book-actions">
+        <form method="post" action="/bookshelf/{{ book.id }}/download_all">
+          <input type="hidden" name="src" value="bookshelf" />
+          <input type="hidden" name="bp" value="{{ pager.page }}" />
+          <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <button class="btn" type="submit">全部</button>
+        </form>
+        <form method="post" action="/bookshelf/{{ book.id }}/toggle_follow">
+          <input type="hidden" name="src" value="bookshelf" />
+          <input type="hidden" name="bp" value="{{ pager.page }}" />
+          <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <button class="btn secondary" type="submit">{{ book.follow_button_text }}</button>
+        </form>
+        <form method="post" action="/bookshelf/{{ book.id }}/remove" onsubmit="return confirm('确认从书架移除？');">
+          <input type="hidden" name="src" value="bookshelf" />
+          <input type="hidden" name="bp" value="{{ pager.page }}" />
+          <input type="hidden" name="bps" value="{{ pager.page_size }}" />
+          <button class="btn warn" type="submit">移除</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="panel"><div class="subtle">书架为空。请先在主页搜索并加入书架。</div></div>
+    {% endif %}
+  </div>
+
+  <div class="pager">
+    <form class="pager-form" method="get" action="/bookshelf">
+      <label style="margin:0;color:var(--muted);">每页</label>
+      <select class="select" style="width:96px;min-width:96px;" name="bps" onchange="this.form.submit()">
+        {% for opt in pager.page_size_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="bp" value="1" />
+    </form>
+    <div class="pager-links">
+      {% if pager.has_prev %}
+      <a class="btn ghost" href="{{ pager.prev_url }}">上一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>上一页</button>
+      {% endif %}
+      <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
+      {% if pager.has_next %}
+      <a class="btn ghost" href="{{ pager.next_url }}">下一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>下一页</button>
+      {% endif %}
+    </div>
+  </div>
+</div>

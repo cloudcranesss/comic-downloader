@@ -1,0 +1,98 @@
+{{ message_html | safe }}
+<div class="panel">
+  <h2 class="title">搜索漫画并操作</h2>
+  <div class="subtle" style="margin-bottom:10px;">主页已合并：创建下载任务与追更入口都放在搜索结果内。</div>
+  <form class="search-form" method="post" action="/search">
+    <input class="input" style="flex:1 1 460px;" name="query" placeholder="输入漫画名称（例如 Wireless Onahole）" value="{{ search_query }}" />
+    <select class="select" style="flex:0 0 220px;" name="provider_id">
+      {% for opt in provider_options %}
+      <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+      {% endfor %}
+    </select>
+    <select class="select" style="flex:0 0 140px;" name="page_size">
+      {% for opt in search_page_size_options %}
+      <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>每页 {{ opt.value }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">搜索</button>
+  </form>
+</div>
+
+{% if results %}
+<div class="panel">
+  <h2 class="title">搜索结果</h2>
+  <div class="subtle" style="margin-bottom:10px;">关键词：{{ results.keyword }}，共 {{ results.total }} 条</div>
+  <div class="pager">
+    <form class="pager-form" method="get" action="/dashboard">
+      <label style="margin:0;color:var(--muted);">每页</label>
+      <select class="select" style="width:96px;min-width:96px;" name="sps" onchange="this.form.submit()">
+        {% for opt in results.page_size_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="sp" value="1" />
+      {% if results.selected_job_id %}
+      <input type="hidden" name="job" value="{{ results.selected_job_id }}" />
+      {% endif %}
+    </form>
+    <div class="pager-links">
+      {% if results.has_prev %}
+      <a class="btn ghost" href="{{ results.prev_url }}">上一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>上一页</button>
+      {% endif %}
+      <span class="subtle">第 {{ results.page }}/{{ results.page_count }} 页</span>
+      {% if results.has_next %}
+      <a class="btn ghost" href="{{ results.next_url }}">下一页</a>
+      {% else %}
+      <button class="btn ghost" type="button" disabled>下一页</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="result-grid">
+    {% for item in results["items"] %}
+    <div class="result-card">
+      {% if item.cover_url %}
+      <div class="result-cover-wrap"><img class="result-cover" src="{{ item.cover_url }}" alt="{{ item.title }}" loading="lazy" /></div>
+      {% else %}
+      <div class="result-cover-wrap"><div class="result-cover-empty">暂无封面</div></div>
+      {% endif %}
+      <div class="result-title" title="{{ item.title }}">{{ item.title }}</div>
+      <div>{{ item.provider_badge_html | safe }}</div>
+      <a class="link result-link" href="{{ item.url }}" title="{{ item.url }}" target="_blank" rel="noreferrer">{{ item.url }}</a>
+      <div class="subtle result-latest" title="最新章节：{{ item.latest }}">最新章节：{{ item.latest }}</div>
+      <div class="actions">
+        <form method="post" action="/search/action">
+          <input type="hidden" name="provider_id" value="{{ item.provider_id }}" />
+          <input type="hidden" name="title" value="{{ item.title }}" />
+          <input type="hidden" name="url" value="{{ item.url }}" />
+          <input type="hidden" name="cover" value="{{ item.cover_url }}" />
+          <input type="hidden" name="sp" value="{{ results.page }}" />
+          <input type="hidden" name="sps" value="{{ results.page_size }}" />
+          <input type="hidden" name="action" value="add_bookshelf" />
+          <button class="btn ghost" type="submit">加入书架</button>
+        </form>
+        <form method="post" action="/search/action">
+          <input type="hidden" name="provider_id" value="{{ item.provider_id }}" />
+          <input type="hidden" name="title" value="{{ item.title }}" />
+          <input type="hidden" name="url" value="{{ item.url }}" />
+          <input type="hidden" name="action" value="download_all" />
+          <button class="btn secondary" type="submit">下载全部</button>
+        </form>
+        <form method="post" action="/search/action">
+          <input type="hidden" name="provider_id" value="{{ item.provider_id }}" />
+          <input type="hidden" name="title" value="{{ item.title }}" />
+          <input type="hidden" name="url" value="{{ item.url }}" />
+          <input type="hidden" name="cover" value="{{ item.cover_url }}" />
+          <input type="hidden" name="action" value="follow_download" />
+          <button class="btn" type="submit">追更下载</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{{ job_html | safe }}

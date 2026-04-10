@@ -1,0 +1,71 @@
+{{ message_html | safe }}
+<div class="panel">
+  <h2 class="title">设置</h2>
+  <form method="post" action="/settings">
+    <div class="settings-section">
+      <h3 class="settings-title">下载配置</h3>
+      <div class="settings-grid">
+        <div><label>下载目录</label><input class="input" name="output_dir" value="{{ settings.output_dir }}" /></div>
+        <div><label>章节并发</label><input class="input" name="chapter_concurrency" type="number" min="1" value="{{ settings.chapter_concurrency }}" /></div>
+        <div><label>图片并发</label><input class="input" name="image_concurrency" type="number" min="1" value="{{ settings.image_concurrency }}" /></div>
+        <div><label>重试次数</label><input class="input" name="retries" type="number" min="1" value="{{ settings.retries }}" /></div>
+        <div><label>超时（秒）</label><input class="input" name="timeout" type="number" min="10" value="{{ settings.timeout }}" /></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">缓存配置（Redis）</h3>
+      <div class="settings-grid">
+        <div><label>Redis URL</label><input class="input" name="redis_url" value="{{ settings.redis_url }}" placeholder="redis://127.0.0.1:6379/0" /></div>
+        <div><label>Redis 用户名（可为空）</label><input class="input" name="redis_username" value="{{ settings.redis_username }}" /></div>
+        <div><label>Redis 密码（可为空）</label><input class="input" type="password" name="redis_password" value="{{ settings.redis_password }}" autocomplete="new-password" /></div>
+        <div><label>缓存 TTL（秒）</label><input class="input" name="cache_ttl_seconds" type="number" min="30" value="{{ settings.cache_ttl_seconds }}" /></div>
+        <div>
+          <label>缓存开关</label>
+          <select class="select" name="cache_enabled">
+            <option value="1"{% if settings.cache_enabled %} selected{% endif %}>启用</option>
+            <option value="0"{% if not settings.cache_enabled %} selected{% endif %}>关闭</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">站点启停</h3>
+      <div class="settings-grid">
+        {% for site in settings.provider_switches %}
+        <label style="display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid rgba(255,255,255,0.12);border-radius:12px;background:rgba(255,255,255,0.03);">
+          <input type="checkbox" name="enabled_providers" value="{{ site.id }}"{% if site.checked %} checked{% endif %} style="margin-top:3px;" />
+          <span>
+            <strong>{{ site.name }}</strong>
+            {% if site.runtime_available %}
+            <div class="subtle">运行状态：可用</div>
+            {% else %}
+            <div class="subtle" style="color:#fecaca;">运行状态：不可用</div>
+            {% endif %}
+            {% if site.reason %}
+            <div class="subtle" style="margin-top:4px;">{{ site.reason }}</div>
+            {% endif %}
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="subtle" style="margin-top:8px;">可勾选你想使用的站点；未勾选的站点将无法搜索、下载和同步。</div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-title">JM 账号</h3>
+      <div class="settings-grid">
+        <div><label>JM 用户名</label><input class="input" name="jm_username" value="{{ settings.jm_username }}" autocomplete="username" /></div>
+        <div><label>JM 密码</label><input class="input" type="password" name="jm_password" value="{{ settings.jm_password }}" autocomplete="current-password" /></div>
+      </div>
+      {% if settings.jm_enabled %}
+      <div class="subtle" style="margin-top:8px;">JM 状态：可用，支持登录与同步收藏。</div>
+      {% else %}
+      <div class="subtle" style="margin-top:8px;color:#fecaca;">JM 状态：不可用（{{ settings.jm_disabled_reason }}）。</div>
+      {% endif %}
+    </div>
+
+    <div style="margin-top:12px;"><button class="btn" type="submit">保存设置</button></div>
+  </form>
+</div>

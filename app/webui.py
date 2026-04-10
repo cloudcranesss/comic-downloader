@@ -1,5 +1,4 @@
 ﻿
-import argparse
 import asyncio
 import json
 import math
@@ -14,24 +13,39 @@ from urllib.parse import quote_plus, urlencode, urljoin
 
 from aiohttp import web
 from bs4 import BeautifulSoup
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from jm_async_downloader import (
-    JMAsyncDownloader,
-    fetch_series_snapshot_jm,
-    jm_available,
-    jm_unavailable_reason,
-    search_jm,
-    sync_jm_favorites,
-)
-from toonily_async_downloader import Chapter, DownloadReport, ToonilyAsyncDownloader, normalize_url
+from downloaders.jm import sync_jm_favorites
+from downloaders.toonily import Chapter, DownloadReport, ToonilyAsyncDownloader, normalize_url
+from provider_base import SiteProvider
+from provider_loader import load_provider_plugins
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 BOOKSHELF_FILE = BASE_DIR / "bookshelf.json"
 SETTINGS_FILE = BASE_DIR / "webui_settings.json"
+TEMPLATES_DIR = BASE_DIR / "templates"
 DEFAULT_PROVIDER_ID = "toonily"
-JM_PROVIDER_ENABLED = jm_available()
-JM_PROVIDER_DISABLED_REASON = jm_unavailable_reason()
+_TEMPLATE_ENV: Optional[Environment] = None
+
+
+def get_template_env() -> Environment:
+    global _TEMPLATE_ENV
+    if _TEMPLATE_ENV is not None:
+        return _TEMPLATE_ENV
+
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATES_DIR)),
+        autoescape=select_autoescape(["html", "xml"]),
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    _TEMPLATE_ENV = env
+    return env
+
+
+def render_template(name: str, **context: Any) -> str:
+    return get_template_env().get_template(name).render(**context)
 
 
 def now_iso() -> str:
@@ -73,176 +87,73 @@ def format_chapter_number(num: Optional[float]) -> str:
     return str(num)
 
 
-class SiteProvider:
-    provider_id = ""
-    display_name = ""
-    enabled = True
-    disabled_reason = ""
-
-    def ui_label(self) -> str:
-        if self.enabled:
-            return self.display_name
-        return f"{self.display_name}（未启用）"
-
-    async def search(self, state: "UIState", keyword: str) -> list[dict[str, Any]]:
-        raise NotImplementedError
-
-    async def fetch_series_snapshot(
-        self,
-        state: "UIState",
-        series_url: str,
-        logger: Optional[Callable[[str], None]] = None,
-    ) -> tuple[str, list[Chapter]]:
-        raise NotImplementedError
-
-    def create_downloader(
-        self,
-        state: "UIState",
-        *,
-        series_url: str,
-        chapter_selector: str,
-        chapter_urls: list[str],
-        logger: Callable[[str], None],
-        progress_callback: Callable[[dict[str, Any]], None],
-        pause_waiter: Callable[[], Any],
-        cancel_checker: Callable[[], bool],
-    ) -> Any:
-        raise NotImplementedError
+PROVIDERS: dict[str, SiteProvider] = {}
+_PROVIDERS_LOADED = False
 
 
-class ToonilyProvider(SiteProvider):
-    provider_id = "toonily"
-    display_name = "Toonily"
-    enabled = True
-
-    async def search(self, state: "UIState", keyword: str) -> list[dict[str, Any]]:
-        return await search_toonily(state, keyword)
-
-    async def fetch_series_snapshot(
-        self,
-        state: "UIState",
-        series_url: str,
-        logger: Optional[Callable[[str], None]] = None,
-    ) -> tuple[str, list[Chapter]]:
-        return await fetch_series_snapshot_toonily(state, series_url, logger=logger)
-
-    def create_downloader(
-        self,
-        state: "UIState",
-        *,
-        series_url: str,
-        chapter_selector: str,
-        chapter_urls: list[str],
-        logger: Callable[[str], None],
-        progress_callback: Callable[[dict[str, Any]], None],
-        pause_waiter: Callable[[], Any],
-        cancel_checker: Callable[[], bool],
-    ) -> ToonilyAsyncDownloader:
-        return ToonilyAsyncDownloader(
-            series_url=series_url,
-            output_dir=state.output_dir,
-            chapter_selector=chapter_selector,
-            chapter_concurrency=state.chapter_concurrency,
-            image_concurrency=state.image_concurrency,
-            retries=state.retries,
-            timeout=state.timeout,
-            chapter_urls=chapter_urls,
-            write_failed_file=True,
-            logger=logger,
-            progress_callback=progress_callback,
-            pause_waiter=pause_waiter,
-            cancel_checker=cancel_checker,
-            cache_enabled=state.cache_enabled,
-            redis_url=state.redis_url,
-            redis_username=state.redis_username,
-            redis_password=state.redis_password,
-            cache_ttl_seconds=state.cache_ttl_seconds,
-        )
+def _provider_loader_log(message: str) -> None:
+    print(f"[provider-loader] {message}")
 
 
-class JMProvider(SiteProvider):
-    provider_id = "jmcomic"
-    display_name = "JMComic"
-    enabled = JM_PROVIDER_ENABLED
-    disabled_reason = JM_PROVIDER_DISABLED_REASON
-
-    async def search(self, state: "UIState", keyword: str) -> list[dict[str, Any]]:
-        return await search_jm(
-            keyword,
-            output_dir=state.output_dir,
-            chapter_concurrency=state.chapter_concurrency,
-            image_concurrency=state.image_concurrency,
-            retries=state.retries,
-            timeout=state.timeout,
-            jm_username=state.jm_username,
-            jm_password=state.jm_password,
-        )
-
-    async def fetch_series_snapshot(
-        self,
-        state: "UIState",
-        series_url: str,
-        logger: Optional[Callable[[str], None]] = None,
-    ) -> tuple[str, list[Chapter]]:
-        return await fetch_series_snapshot_jm(
-            series_url,
-            output_dir=state.output_dir,
-            chapter_concurrency=state.chapter_concurrency,
-            image_concurrency=state.image_concurrency,
-            retries=state.retries,
-            timeout=state.timeout,
-            jm_username=state.jm_username,
-            jm_password=state.jm_password,
-        )
-
-    def create_downloader(
-        self,
-        state: "UIState",
-        *,
-        series_url: str,
-        chapter_selector: str,
-        chapter_urls: list[str],
-        logger: Callable[[str], None],
-        progress_callback: Callable[[dict[str, Any]], None],
-        pause_waiter: Callable[[], Any],
-        cancel_checker: Callable[[], bool],
-    ) -> Any:
-        return JMAsyncDownloader(
-            series_url=series_url,
-            output_dir=state.output_dir,
-            chapter_selector=chapter_selector,
-            chapter_concurrency=state.chapter_concurrency,
-            image_concurrency=state.image_concurrency,
-            retries=state.retries,
-            timeout=state.timeout,
-            chapter_urls=chapter_urls,
-            write_failed_file=True,
-            logger=logger,
-            progress_callback=progress_callback,
-            pause_waiter=pause_waiter,
-            cancel_checker=cancel_checker,
-            jm_username=state.jm_username,
-            jm_password=state.jm_password,
-        )
+def _provider_context() -> dict[str, Any]:
+    return {
+        "search_toonily": search_toonily,
+        "fetch_series_snapshot_toonily": fetch_series_snapshot_toonily,
+    }
 
 
-PROVIDERS: dict[str, SiteProvider] = {
-    ToonilyProvider.provider_id: ToonilyProvider(),
-    JMProvider.provider_id: JMProvider(),
-}
+def ensure_providers_loaded() -> None:
+    global _PROVIDERS_LOADED
+    if _PROVIDERS_LOADED:
+        return
+
+    plugins_dir = BASE_DIR / "providers"
+    loaded = load_provider_plugins(plugins_dir, _provider_context(), logger=_provider_loader_log)
+    PROVIDERS.clear()
+    PROVIDERS.update(loaded)
+    _PROVIDERS_LOADED = True
+
+
+def list_providers() -> list[SiteProvider]:
+    ensure_providers_loaded()
+    providers = list(PROVIDERS.values())
+    providers.sort(key=lambda p: (p.provider_id != DEFAULT_PROVIDER_ID, p.display_name.lower()))
+    return providers
 
 
 def get_provider(provider_id: str) -> SiteProvider:
+    ensure_providers_loaded()
     key = (provider_id or "").strip().lower()
-    return PROVIDERS.get(key) or PROVIDERS[DEFAULT_PROVIDER_ID]
+    provider = PROVIDERS.get(key)
+    if provider is not None:
+        return provider
+    default_provider = PROVIDERS.get(DEFAULT_PROVIDER_ID)
+    if default_provider is not None:
+        return default_provider
+    if PROVIDERS:
+        return next(iter(PROVIDERS.values()))
+    raise RuntimeError("未加载到任何站点插件，请检查 providers 目录。")
 
 
 def provider_name(provider_id: str) -> str:
+    ensure_providers_loaded()
     key = (provider_id or "").strip().lower()
     provider = PROVIDERS.get(key)
     if provider is not None:
         return provider.display_name
     return key or DEFAULT_PROVIDER_ID
+
+
+def provider_disabled_reason(state: "UIState", provider: SiteProvider) -> str:
+    if not provider.enabled:
+        return provider.disabled_reason or "该站点当前不可用。"
+    if not state.is_provider_enabled(provider.provider_id):
+        return "该站点已在设置中停用。"
+    return ""
+
+
+def provider_enabled_for_state(state: "UIState", provider: SiteProvider) -> bool:
+    return provider_disabled_reason(state, provider) == ""
 
 
 def provider_icon_svg(provider_id: str) -> str:
@@ -302,6 +213,7 @@ class UIState:
         self.cache_ttl_seconds = 900
         self.jm_username = os.getenv("JM_USERNAME", "").strip()
         self.jm_password = os.getenv("JM_PASSWORD", "").strip()
+        self.enabled_provider_ids: set[str] = set(PROVIDERS.keys()) or {DEFAULT_PROVIDER_ID}
 
         self.max_job_logs = 600
         self._save_lock = asyncio.Lock()
@@ -322,8 +234,15 @@ class UIState:
                 self.cache_ttl_seconds = max(30, int(raw.get("cache_ttl_seconds", self.cache_ttl_seconds)))
                 self.jm_username = str(raw.get("jm_username", self.jm_username)).strip()
                 self.jm_password = str(raw.get("jm_password", self.jm_password)).strip()
+                enabled_providers = raw.get("enabled_providers")
+                if isinstance(enabled_providers, list):
+                    self.enabled_provider_ids = {
+                        str(pid).strip().lower() for pid in enabled_providers if str(pid).strip()
+                    }
             except Exception:
                 pass
+
+        self.normalize_enabled_providers()
 
         if BOOKSHELF_FILE.exists():
             try:
@@ -349,12 +268,35 @@ class UIState:
             "cache_ttl_seconds": self.cache_ttl_seconds,
             "jm_username": self.jm_username,
             "jm_password": self.jm_password,
+            "enabled_providers": sorted(self.enabled_provider_ids),
         }
         async with self._save_lock:
             SETTINGS_FILE.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+
+    def normalize_enabled_providers(self) -> None:
+        ensure_providers_loaded()
+        known = {str(pid).strip().lower() for pid in PROVIDERS.keys() if str(pid).strip()}
+        selected = {pid for pid in self.enabled_provider_ids if pid in known}
+        if not selected:
+            if DEFAULT_PROVIDER_ID in known:
+                selected = {DEFAULT_PROVIDER_ID}
+            elif known:
+                selected = {sorted(known)[0]}
+        self.enabled_provider_ids = selected
+
+        if self.enabled_provider_ids and self.last_search_provider not in self.enabled_provider_ids:
+            self.last_search_provider = sorted(self.enabled_provider_ids)[0]
+
+    def is_provider_enabled(self, provider_id: str) -> bool:
+        key = (provider_id or "").strip().lower()
+        return key in self.enabled_provider_ids
+
+    def set_enabled_providers(self, provider_ids: set[str]) -> None:
+        self.enabled_provider_ids = {str(pid).strip().lower() for pid in provider_ids if str(pid).strip()}
+        self.normalize_enabled_providers()
 
     async def save_bookshelf(self) -> None:
         items = list(self.bookshelf.values())
@@ -710,7 +652,7 @@ async def fetch_series_snapshot_toonily(
 
 async def search_by_provider(state: UIState, provider_id: str, keyword: str) -> list[dict[str, Any]]:
     provider = get_provider(provider_id)
-    if not provider.enabled:
+    if not provider_enabled_for_state(state, provider):
         return []
     results = await provider.search(state, keyword)
     normalized_results: list[dict[str, Any]] = []
@@ -728,8 +670,9 @@ async def fetch_series_snapshot(
     logger: Optional[callable] = None,
 ) -> tuple[str, list[Chapter]]:
     provider = get_provider(provider_id)
-    if not provider.enabled:
-        raise RuntimeError(provider.disabled_reason or "该站点未启用。")
+    reason = provider_disabled_reason(state, provider)
+    if reason:
+        raise RuntimeError(reason)
     return await provider.fetch_series_snapshot(state, series_url, logger=logger)
 
 
@@ -813,6 +756,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         ("dashboard", "主页", "/dashboard"),
         ("progress", "进度", "/progress"),
         ("bookshelf", "书架", "/bookshelf"),
+        ("follow", "追更", "/follow"),
         ("settings", "设置", "/settings"),
     ]
     nav_html_parts = []
@@ -828,78 +772,106 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "  <meta charset=\"utf-8\" />\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
         f"  <title>{escape(title)}</title>\n"
+        "  <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n"
+        "  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n"
+        "  <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap\" rel=\"stylesheet\">\n"
         "  <style>\n"
         "    :root {\n"
-        "      --bg-a: #0f172a;\n"
-        "      --bg-b: #0b1f2c;\n"
-        "      --accent: #f59e0b;\n"
-        "      --accent-2: #14b8a6;\n"
-        "      --panel: rgba(13, 25, 38, 0.74);\n"
-        "      --panel-border: rgba(255, 255, 255, 0.12);\n"
-        "      --text: #e5ecf5;\n"
-        "      --muted: #9fb2c8;\n"
+        "      --primary: #6366f1;\n"
+        "      --primary-light: #818cf8;\n"
+        "      --primary-glow: #8b5cf6;\n"
+        "      --secondary: #ec4899;\n"
+        "      --accent: #22d3ee;\n"
+        "      --warning: #f59e0b;\n"
         "      --danger: #fb7185;\n"
-        "      --ok: #34d399;\n"
-        "      --shadow: 0 16px 38px rgba(0, 0, 0, 0.35);\n"
+        "      --text: #f8fafc;\n"
+        "      --muted: #9aa7bd;\n"
+        "      --bg-dark: #0f172a;\n"
+        "      --bg-darker: #020617;\n"
+        "      --panel: rgba(15, 23, 42, 0.6);\n"
+        "      --panel-border: rgba(255, 255, 255, 0.1);\n"
+        "      --glass: rgba(255, 255, 255, 0.04);\n"
+        "      --glass-hover: rgba(255, 255, 255, 0.08);\n"
+        "      --shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);\n"
         "    }\n"
         "    * { box-sizing: border-box; }\n"
         "    body {\n"
         "      margin: 0;\n"
         "      color: var(--text);\n"
-        "      font-family: \"Noto Sans SC\", \"Source Han Sans SC\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n"
-        "      background: radial-gradient(circle at 12% 18%, #0e3344 0%, transparent 36%),\n"
-        "                  radial-gradient(circle at 92% 4%, #1f3c2a 0%, transparent 33%),\n"
-        "                  linear-gradient(145deg, var(--bg-a), var(--bg-b));\n"
+        "      font-family: 'Inter', 'Noto Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;\n"
+        "      background: var(--bg-darker);\n"
         "      min-height: 100vh;\n"
+        "      overflow-x: hidden;\n"
         "    }\n"
-        "    .shell { width: min(1200px, calc(100% - 28px)); margin: 20px auto 32px; }\n"
+        "    .bg-effects { position: fixed; inset: 0; z-index: -2; overflow: hidden; }\n"
+        "    .blob { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.34; animation: float 24s ease-in-out infinite; }\n"
+        "    .blob.one { width: 520px; height: 520px; background: linear-gradient(135deg, var(--primary), var(--primary-glow)); top: -180px; left: -120px; }\n"
+        "    .blob.two { width: 460px; height: 460px; background: linear-gradient(135deg, var(--secondary), #f472b6); right: -120px; bottom: -100px; animation-delay: -8s; }\n"
+        "    .blob.three { width: 360px; height: 360px; background: linear-gradient(135deg, var(--accent), #06b6d4); left: 45%; top: 42%; opacity: 0.24; animation-delay: -4s; }\n"
+        "    .grid-pattern { position: fixed; inset: 0; z-index: -1; background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 56px 56px; }\n"
+        "    @keyframes float {\n"
+        "      0%,100% { transform: translate(0,0) scale(1); }\n"
+        "      25% { transform: translate(36px, -42px) scale(1.05); }\n"
+        "      50% { transform: translate(-24px, 34px) scale(0.95); }\n"
+        "      75% { transform: translate(18px, 44px) scale(1.02); }\n"
+        "    }\n"
+        "    .shell { width: min(1240px, calc(100% - 28px)); margin: 20px auto 32px; }\n"
         "    .top {\n"
         "      display: flex;\n"
         "      align-items: center;\n"
         "      justify-content: space-between;\n"
         "      gap: 14px;\n"
         "      margin-bottom: 14px;\n"
+        "      position: sticky;\n"
+        "      top: 12px;\n"
+        "      z-index: 20;\n"
+        "      background: rgba(2, 6, 23, 0.65);\n"
+        "      border: 1px solid rgba(255,255,255,0.08);\n"
+        "      border-radius: 18px;\n"
+        "      backdrop-filter: blur(16px);\n"
+        "      padding: 12px 14px;\n"
         "    }\n"
-        "    .logo { font-size: 24px; font-weight: 800; letter-spacing: 0.8px; }\n"
-        "    .logo span { color: var(--accent); }\n"
+        "    .logo { font-size: 36px; font-weight: 800; letter-spacing: 0.6px; background: linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.72) 55%, var(--primary-light) 100%); -webkit-background-clip: text; color: transparent; }\n"
         "    .nav { display: flex; gap: 10px; flex-wrap: wrap; }\n"
         "    .nav-link {\n"
         "      text-decoration: none;\n"
         "      color: var(--muted);\n"
-        "      padding: 9px 14px;\n"
-        "      border-radius: 12px;\n"
+        "      padding: 10px 16px;\n"
+        "      border-radius: 14px;\n"
         "      border: 1px solid transparent;\n"
-        "      transition: 0.2s ease;\n"
-        "      background: rgba(255,255,255,0.03);\n"
+        "      transition: 0.25s ease;\n"
+        "      background: var(--glass);\n"
+        "      font-weight: 600;\n"
         "    }\n"
-        "    .nav-link:hover { color: #fff; border-color: rgba(255,255,255,0.18); }\n"
+        "    .nav-link:hover { color: #fff; border-color: rgba(255,255,255,0.24); background: var(--glass-hover); transform: translateY(-1px); }\n"
         "    .nav-link.active {\n"
-        "      color: #111827;\n"
+        "      color: #030712;\n"
         "      font-weight: 700;\n"
-        "      background: linear-gradient(90deg, var(--accent), #fde68a);\n"
-        "      border-color: rgba(255,255,255,0.2);\n"
+        "      background: linear-gradient(135deg, var(--primary-light), var(--secondary));\n"
+        "      border-color: rgba(255,255,255,0.34);\n"
+        "      box-shadow: 0 10px 24px -10px rgba(99,102,241,0.65);\n"
         "    }\n"
         "    .panel {\n"
         "      background: var(--panel);\n"
         "      border: 1px solid var(--panel-border);\n"
-        "      border-radius: 16px;\n"
+        "      border-radius: 18px;\n"
         "      box-shadow: var(--shadow);\n"
-        "      backdrop-filter: blur(8px);\n"
-        "      padding: 16px;\n"
+        "      backdrop-filter: blur(14px);\n"
+        "      padding: 18px;\n"
         "      margin-bottom: 16px;\n"
         "    }\n"
         "    .title { margin: 0 0 10px; font-size: 20px; font-weight: 800; }\n"
-        "    .subtle { color: var(--muted); font-size: 14px; }\n"
+        "    .subtle { color: var(--muted); font-size: 14px; line-height: 1.45; }\n"
         "    .msg {\n"
         "      position: fixed;\n"
-        "      top: 14px;\n"
+        "      top: 16px;\n"
         "      left: 50%;\n"
         "      transform: translate(-50%, -10px);\n"
         "      z-index: 9999;\n"
         "      width: min(760px, calc(100% - 20px));\n"
         "      border-radius: 12px;\n"
-        "      background: rgba(20, 184, 166, 0.18);\n"
-        "      border: 1px solid rgba(20, 184, 166, 0.45);\n"
+        "      background: rgba(34, 211, 238, 0.16);\n"
+        "      border: 1px solid rgba(34, 211, 238, 0.38);\n"
         "      box-shadow: 0 12px 28px rgba(2, 6, 23, 0.36);\n"
         "      color: #d1fae5;\n"
         "      padding: 10px 12px;\n"
@@ -947,40 +919,46 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .search-form { display: flex; gap: 10px; flex-wrap: wrap; }\n"
         "    .input,\n"
         "    .select {\n"
-        "      background: rgba(255,255,255,0.05);\n"
+        "      background: rgba(15,23,42,0.55);\n"
         "      color: var(--text);\n"
-        "      border: 1px solid rgba(255,255,255,0.2);\n"
-        "      border-radius: 10px;\n"
+        "      border: 1px solid rgba(255,255,255,0.16);\n"
+        "      border-radius: 12px;\n"
         "      padding: 10px 12px;\n"
         "      min-height: 42px;\n"
         "      width: 100%;\n"
+        "      transition: border-color 0.2s ease, box-shadow 0.2s ease;\n"
         "    }\n"
+        "    .input:focus,\n"
+        "    .select:focus { outline: none; border-color: rgba(99,102,241,0.6); box-shadow: 0 0 0 3px rgba(99,102,241,0.18); }\n"
         "    .input::placeholder { color: #86a1b9; }\n"
         "    .btn {\n"
         "      border: 0;\n"
-        "      border-radius: 10px;\n"
+        "      border-radius: 12px;\n"
         "      padding: 10px 14px;\n"
         "      cursor: pointer;\n"
-        "      color: #081018;\n"
+        "      color: #020617;\n"
         "      font-weight: 700;\n"
-        "      background: linear-gradient(90deg, var(--accent), #fcd34d);\n"
-        "      transition: transform 0.12s ease, filter 0.2s ease;\n"
+        "      background: linear-gradient(135deg, var(--primary-light), var(--secondary));\n"
+        "      box-shadow: 0 10px 26px -12px rgba(139,92,246,0.78);\n"
+        "      transition: transform 0.16s ease, filter 0.2s ease, box-shadow 0.2s ease;\n"
         "    }\n"
-        "    .btn:hover { transform: translateY(-1px); filter: brightness(1.05); }\n"
+        "    .btn:hover { transform: translateY(-2px); filter: brightness(1.05); box-shadow: 0 16px 30px -14px rgba(139,92,246,0.8); }\n"
         "    .btn.secondary {\n"
-        "      background: linear-gradient(90deg, var(--accent-2), #5eead4);\n"
+        "      background: linear-gradient(135deg, var(--accent), #22c55e);\n"
+        "      box-shadow: 0 10px 26px -12px rgba(34,211,238,0.72);\n"
         "    }\n"
         "    .btn.ghost {\n"
         "      color: var(--text);\n"
-        "      border: 1px solid rgba(255,255,255,0.24);\n"
-        "      background: rgba(255,255,255,0.06);\n"
+        "      border: 1px solid rgba(255,255,255,0.22);\n"
+        "      background: rgba(255,255,255,0.05);\n"
+        "      box-shadow: none;\n"
         "    }\n"
-        "    .btn.warn { background: linear-gradient(90deg, #ef4444, #fb7185); color: #fff; }\n"
+        "    .btn.warn { background: linear-gradient(135deg, #ef4444, #fb7185); color: #fff; }\n"
         "    .btn[disabled] { opacity: 0.52; cursor: not-allowed; transform: none; }\n"
         "    .result-card {\n"
-        "      border-radius: 14px;\n"
-        "      border: 1px solid rgba(255,255,255,0.12);\n"
-        "      background: rgba(255,255,255,0.03);\n"
+        "      border-radius: 16px;\n"
+        "      border: 1px solid rgba(255,255,255,0.11);\n"
+        "      background: rgba(15,23,42,0.55);\n"
         "      padding: 12px;\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
@@ -993,8 +971,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      aspect-ratio: 3 / 4;\n"
         "      border-radius: 10px;\n"
         "      overflow: hidden;\n"
-        "      background: linear-gradient(145deg, rgba(148,163,184,0.15), rgba(148,163,184,0.05));\n"
-        "      border: 1px solid rgba(255,255,255,0.12);\n"
+        "      background: linear-gradient(145deg, rgba(148,163,184,0.16), rgba(148,163,184,0.06));\n"
+        "      border: 1px solid rgba(255,255,255,0.13);\n"
         "      display: flex;\n"
         "      align-items: center;\n"
         "      justify-content: center;\n"
@@ -1047,7 +1025,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      border: 1px solid rgba(255,255,255,0.2);\n"
         "      font-size: 12px;\n"
         "      color: #dbeafe;\n"
-        "      background: rgba(96,165,250,0.2);\n"
+        "      background: rgba(99,102,241,0.24);\n"
         "    }\n"
         "    .progress {\n"
         "      width: 100%;\n"
@@ -1060,7 +1038,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .bar {\n"
         "      height: 100%;\n"
         "      width: 0%;\n"
-        "      background: linear-gradient(90deg, #22d3ee, #34d399);\n"
+        "      background: linear-gradient(90deg, var(--primary-light), var(--accent));\n"
         "      transition: width 0.3s ease;\n"
         "    }\n"
         "    .log-box {\n"
@@ -1080,7 +1058,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      padding: 10px;\n"
         "      border: 1px solid rgba(255,255,255,0.12);\n"
         "      border-radius: 14px;\n"
-        "      background: rgba(255,255,255,0.03);\n"
+        "      background: rgba(15,23,42,0.55);\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
         "      gap: 8px;\n"
@@ -1148,11 +1126,11 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      padding: 4px 8px;\n"
         "      border-radius: 999px;\n"
         "      border: 1px solid rgba(255,255,255,0.2);\n"
-        "      background: rgba(255,255,255,0.06);\n"
+        "      background: rgba(255,255,255,0.08);\n"
         "      color: #dbeafe;\n"
         "    }\n"
-        "    .site-badge.toonily { color: #fde68a; border-color: rgba(245, 158, 11, 0.5); }\n"
-        "    .site-badge.jmcomic { color: #99f6e4; border-color: rgba(20, 184, 166, 0.5); }\n"
+        "    .site-badge.toonily { color: #fcd34d; border-color: rgba(245, 158, 11, 0.56); }\n"
+        "    .site-badge.jmcomic { color: #67e8f9; border-color: rgba(34, 211, 238, 0.56); }\n"
         "    .site-icon { width: 14px; height: 14px; display: inline-block; }\n"
         "    .pager {\n"
         "      display: flex;\n"
@@ -1175,6 +1153,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    @media (max-width: 780px) {\n"
         "      .shell { width: calc(100% - 16px); margin-top: 12px; }\n"
         "      .top { flex-direction: column; align-items: flex-start; }\n"
+        "      .logo { font-size: 32px; }\n"
         "      .search-form { flex-direction: column; }\n"
         "      .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }\n"
         "      .bookshelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }\n"
@@ -1185,6 +1164,12 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "  </style>\n"
         "</head>\n"
         "<body>\n"
+        "  <div class=\"bg-effects\">"
+        "    <div class=\"blob one\"></div>"
+        "    <div class=\"blob two\"></div>"
+        "    <div class=\"blob three\"></div>"
+        "  </div>"
+        "  <div class=\"grid-pattern\"></div>\n"
         "  <div class=\"shell\">\n"
         "    <div class=\"top\">\n"
         "      <div class=\"logo\">漫画下载</div>\n"
@@ -1392,7 +1377,14 @@ def render_dashboard(
     search_page: int,
     search_page_size: int,
 ) -> str:
-    results_html = ""
+    selected_provider = get_provider(state.last_search_provider)
+    if not provider_enabled_for_state(state, selected_provider):
+        for candidate in list_providers():
+            if provider_enabled_for_state(state, candidate):
+                state.last_search_provider = candidate.provider_id
+                break
+
+    results: Optional[dict[str, Any]] = None
     if state.last_search_results:
         total_results = len(state.last_search_results)
         page_size = max(4, min(40, int(search_page_size)))
@@ -1408,11 +1400,11 @@ def render_dashboard(
                 params["job"] = selected_job_id
             return f"/dashboard?{urlencode(params)}"
 
-        cards: list[str] = []
+        items: list[dict[str, Any]] = []
         for item in page_results:
             title = str(item.get("title", "") or "")
             url = str(item.get("url", "") or "")
-            latest = str(item.get("latest", "") or "")
+            latest = str(item.get("latest", "") or "") or "-"
             cover = item.get("cover", "")
             provider_id = str(item.get("provider_id") or state.last_search_provider or DEFAULT_PROVIDER_ID)
             provider_badge = render_provider_badge(provider_id)
@@ -1424,134 +1416,75 @@ def render_dashboard(
             if cover_url and not cover_url.startswith(("http://", "https://")):
                 cover_url = ""
 
-            cover_html = (
-                f"<div class=\"result-cover-wrap\"><img class=\"result-cover\" src=\"{escape(cover_url)}\" alt=\"{escape(title)}\" loading=\"lazy\" /></div>"
-                if cover_url
-                else "<div class=\"result-cover-wrap\"><div class=\"result-cover-empty\">暂无封面</div></div>"
+            items.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "latest": latest,
+                    "cover_url": cover_url,
+                    "provider_id": provider_id,
+                    "provider_badge_html": provider_badge,
+                }
             )
-            card = (
-                "<div class=\"result-card\">"
-                f"{cover_html}"
-                f"<div class=\"result-title\" title=\"{escape(title)}\">{escape(title)}</div>"
-                f"<div>{provider_badge}</div>"
-                f"<a class=\"link result-link\" href=\"{escape(url)}\" title=\"{escape(url)}\" target=\"_blank\" rel=\"noreferrer\">{escape(url)}</a>"
-                f"<div class=\"subtle result-latest\" title=\"最新章节：{escape(latest or '-')}\">最新章节：{escape(latest or '-')}</div>"
-                "<div class=\"actions\">"
-                "<form method=\"post\" action=\"/search/action\">"
-                f"<input type=\"hidden\" name=\"provider_id\" value=\"{escape(provider_id)}\" />"
-                f"<input type=\"hidden\" name=\"title\" value=\"{escape(title)}\" />"
-                f"<input type=\"hidden\" name=\"url\" value=\"{escape(url)}\" />"
-                f"<input type=\"hidden\" name=\"cover\" value=\"{escape(cover_url)}\" />"
-                f"<input type=\"hidden\" name=\"sp\" value=\"{page}\" />"
-                f"<input type=\"hidden\" name=\"sps\" value=\"{page_size}\" />"
-                "<input type=\"hidden\" name=\"action\" value=\"add_bookshelf\" />"
-                "<button class=\"btn ghost\" type=\"submit\">加入书架</button>"
-                "</form>"
-                "<form method=\"post\" action=\"/search/action\">"
-                f"<input type=\"hidden\" name=\"provider_id\" value=\"{escape(provider_id)}\" />"
-                f"<input type=\"hidden\" name=\"title\" value=\"{escape(title)}\" />"
-                f"<input type=\"hidden\" name=\"url\" value=\"{escape(url)}\" />"
-                "<input type=\"hidden\" name=\"action\" value=\"download_all\" />"
-                "<button class=\"btn secondary\" type=\"submit\">下载全部</button>"
-                "</form>"
-                "<form method=\"post\" action=\"/search/action\">"
-                f"<input type=\"hidden\" name=\"provider_id\" value=\"{escape(provider_id)}\" />"
-                f"<input type=\"hidden\" name=\"title\" value=\"{escape(title)}\" />"
-                f"<input type=\"hidden\" name=\"url\" value=\"{escape(url)}\" />"
-                f"<input type=\"hidden\" name=\"cover\" value=\"{escape(cover_url)}\" />"
-                "<input type=\"hidden\" name=\"action\" value=\"follow_download\" />"
-                "<button class=\"btn\" type=\"submit\">追更下载</button>"
-                "</form>"
-                "</div>"
-                "</div>"
-            )
-            cards.append(card)
 
-        page_size_options = [8, 12, 16, 24, 40]
-        page_size_html = "".join(
-            (
-                f"<option value=\"{size}\" selected>{size}</option>"
-                if size == page_size
-                else f"<option value=\"{size}\">{size}</option>"
-            )
-            for size in page_size_options
-        )
-
-        pager_html = (
-            "<div class=\"pager\">"
-            "<form class=\"pager-form\" method=\"get\" action=\"/dashboard\">"
-            "<label style=\"margin:0;color:var(--muted);\">每页</label>"
-            f"<select class=\"select\" style=\"width:96px;min-width:96px;\" name=\"sps\" onchange=\"this.form.submit()\">{page_size_html}</select>"
-            "<input type=\"hidden\" name=\"sp\" value=\"1\" />"
-            + (f"<input type=\"hidden\" name=\"job\" value=\"{escape(selected_job_id)}\" />" if selected_job_id else "")
-            + "</form>"
-            + "<div class=\"pager-links\">"
-            + (
-                f"<a class=\"btn ghost\" href=\"{escape(dashboard_page_url(page - 1))}\">上一页</a>"
-                if page > 1
-                else "<button class=\"btn ghost\" type=\"button\" disabled>上一页</button>"
-            )
-            + f"<span class=\"subtle\">第 {page}/{page_count} 页</span>"
-            + (
-                f"<a class=\"btn ghost\" href=\"{escape(dashboard_page_url(page + 1))}\">下一页</a>"
-                if page < page_count
-                else "<button class=\"btn ghost\" type=\"button\" disabled>下一页</button>"
-            )
-            + "</div>"
-            + "</div>"
-        )
-
-        results_html = (
-            "<div class=\"panel\">"
-            "<h2 class=\"title\">搜索结果</h2>"
-            f"<div class=\"subtle\" style=\"margin-bottom:10px;\">关键词：{escape(state.last_search_query)}，共 {total_results} 条</div>"
-            f"{pager_html}"
-            f"<div class=\"result-grid\">{''.join(cards)}</div>"
-            "</div>"
-        )
+        results = {
+            "keyword": state.last_search_query,
+            "total": total_results,
+            "page": page,
+            "page_count": page_count,
+            "page_size": page_size,
+            "selected_job_id": selected_job_id,
+            "has_prev": page > 1,
+            "has_next": page < page_count,
+            "prev_url": dashboard_page_url(page - 1),
+            "next_url": dashboard_page_url(page + 1),
+            "page_size_options": [
+                {"value": size, "selected": size == page_size} for size in (8, 12, 16, 24, 40)
+            ],
+            "items": items,
+        }
 
     job_html = "<div class=\"panel\"><h2 class=\"title\">当前任务</h2><div class=\"subtle\">暂无任务，可在搜索结果中直接创建下载。</div></div>"
     script = ""
     if selected_job_id and selected_job_id in state.jobs:
         job_html, script = render_job_panel(state.jobs[selected_job_id], heading="当前任务", full_page=False)
 
-    provider_options: list[str] = []
-    for provider in PROVIDERS.values():
-        selected = " selected" if provider.provider_id == state.last_search_provider else ""
+    provider_options: list[dict[str, Any]] = []
+    for provider in list_providers():
+        reason = provider_disabled_reason(state, provider)
+        if reason:
+            if provider.enabled:
+                label = f"{provider.display_name}（已停用）"
+            else:
+                label = f"{provider.display_name}（不可用）"
+        else:
+            label = provider.display_name
         provider_options.append(
-            f"<option value=\"{escape(provider.provider_id)}\"{selected}>{escape(provider.ui_label())}</option>"
+            {
+                "value": provider.provider_id,
+                "label": label,
+                "selected": provider.provider_id == state.last_search_provider,
+            }
         )
-    provider_select = "".join(provider_options)
 
-    body = (
-        render_message(msg)
-        + "<div class=\"panel\">"
-        + "<h2 class=\"title\">搜索漫画并操作</h2>"
-        + "<div class=\"subtle\" style=\"margin-bottom:10px;\">主页已合并：创建下载任务与追更入口都放在搜索结果内。</div>"
-        + "<form class=\"search-form\" method=\"post\" action=\"/search\">"
-        + f"<input class=\"input\" style=\"flex:1 1 460px;\" name=\"query\" placeholder=\"输入漫画名称（例如 Wireless Onahole）\" value=\"{escape(state.last_search_query)}\" />"
-        + f"<select class=\"select\" style=\"flex:0 0 220px;\" name=\"provider_id\">{provider_select}</select>"
-        + "<select class=\"select\" style=\"flex:0 0 140px;\" name=\"page_size\">"
-        + "".join(
-            (
-                f"<option value=\"{size}\" selected>每页 {size}</option>"
-                if size == max(4, min(40, int(search_page_size)))
-                else f"<option value=\"{size}\">每页 {size}</option>"
-            )
-            for size in (8, 12, 16, 24, 40)
-        )
-        + "</select>"
-        + "<button class=\"btn\" type=\"submit\">搜索</button>"
-        + "</form>"
-        + "</div>"
-        + results_html
-        + job_html
+    search_page_size_options = [
+        {"value": size, "selected": size == max(4, min(40, int(search_page_size)))}
+        for size in (8, 12, 16, 24, 40)
+    ]
+    body = render_template(
+        "dashboard.html",
+        message_html=render_message(msg),
+        search_query=state.last_search_query,
+        provider_options=provider_options,
+        search_page_size_options=search_page_size_options,
+        results=results,
+        job_html=job_html,
     )
     return render_layout(title="漫画下载 - 主页", active_nav="dashboard", body=body, script=script)
 
 
 def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
-    body = render_message(msg)
+    progress_content_html = ""
     script = ""
 
     job = state.jobs.get(selected_job_id) if selected_job_id else None
@@ -1559,7 +1492,7 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
         job = state.jobs.get(state.current_job_id)
 
     if job is None:
-        body += (
+        progress_content_html = (
             "<div class=\"panel\">"
             "<h2 class=\"title\">任务进度</h2>"
             "<div class=\"subtle\">当前没有活跃任务。请前往主页搜索漫画并创建下载任务。</div>"
@@ -1568,9 +1501,50 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
         )
     else:
         panel_html, script = render_job_panel(job, heading="任务进度", full_page=True)
-        body += panel_html
+        progress_content_html = panel_html
+
+    body = render_template(
+        "progress.html",
+        message_html=render_message(msg),
+        progress_content_html=progress_content_html,
+    )
 
     return render_layout(title="漫画下载 - 进度", active_nav="progress", body=body, script=script)
+
+
+def normalize_cover_url(value: Any) -> str:
+    cover_url = str(value or "").strip()
+    if cover_url.startswith("//"):
+        cover_url = f"https:{cover_url}"
+    elif cover_url.startswith("/"):
+        cover_url = urljoin("https://toonily.com", cover_url)
+    if cover_url and not cover_url.startswith(("http://", "https://")):
+        return ""
+    return cover_url
+
+
+def build_book_card_payload(book: dict[str, Any]) -> dict[str, Any]:
+    follow_enabled = bool(book.get("follow_enabled", True))
+    follow_text = "开启" if follow_enabled else "关闭"
+    pending = int(book.get("pending_update_count", 0))
+    provider_id = str(book.get("provider_id") or DEFAULT_PROVIDER_ID)
+    provider_badge = render_provider_badge(provider_id)
+    return {
+        "id": str(book["id"]),
+        "title": str(book.get("title") or "未命名漫画"),
+        "cover_url": normalize_cover_url(book.get("cover")),
+        "provider_badge_html": provider_badge,
+        "downloaded_text": (
+            f"已下载：{book.get('last_downloaded_chapter_title') or '-'} "
+            f"/ #{format_chapter_number(book.get('last_downloaded_chapter_number'))}"
+        ),
+        "latest_text": (
+            f"最新：{book.get('latest_site_chapter_title') or '-'} "
+            f"/ #{format_chapter_number(book.get('latest_site_chapter_number'))}"
+        ),
+        "summary_text": f"待更新：{pending} | 追更：{follow_text} | 检查：{fmt_time(book.get('last_checked_at', ''))}",
+        "follow_enabled": follow_enabled,
+    }
 
 
 def render_bookshelf(
@@ -1582,6 +1556,8 @@ def render_bookshelf(
 ) -> str:
     jm_provider = get_provider("jmcomic")
     has_jm_login = bool(state.jm_username and state.jm_password)
+    jm_reason = provider_disabled_reason(state, jm_provider)
+    jm_enabled_for_use = not jm_reason
 
     all_books = state.list_books()
     total_books = len(all_books)
@@ -1595,209 +1571,117 @@ def render_bookshelf(
     def bookshelf_page_url(target_page: int) -> str:
         return f"/bookshelf?{urlencode({'bp': str(target_page), 'bps': str(page_size)})}"
 
-    sync_panel_parts: list[str] = []
-    if jm_provider.enabled:
-        sync_panel_parts.append(
-            "<div class=\"subtle\" style=\"margin-bottom:8px;\">"
-            + (
-                f"JM 登录已配置：{escape(state.jm_username)}"
-                if has_jm_login
-                else "JM 登录未配置，请先到设置页填写用户名和密码。"
-            )
-            + "</div>"
-        )
-        if has_jm_login:
-            sync_panel_parts.append(
-                "<form method=\"post\" action=\"/bookshelf/sync-jm-favorites\">"
-                f"<input type=\"hidden\" name=\"bp\" value=\"{page}\" />"
-                f"<input type=\"hidden\" name=\"bps\" value=\"{page_size}\" />"
-                "<button class=\"btn secondary\" type=\"submit\">同步 JM 收藏到书架</button>"
-                "</form>"
-            )
-        else:
-            sync_panel_parts.append("<a class=\"btn ghost\" href=\"/settings\">去设置 JM 账号</a>")
-    else:
-        reason = jm_provider.disabled_reason or "未知原因"
-        sync_panel_parts.append(
-            f"<div class=\"subtle\" style=\"margin-bottom:8px;color:#fecaca;\">JM 功能不可用：{escape(reason)}</div>"
-        )
+    books = [build_book_card_payload(book) for book in page_books]
+    for book in books:
+        book["follow_button_text"] = "关闭追更" if book["follow_enabled"] else "开启追更"
 
-    sync_panel_html = (
-        "<div class=\"panel\">"
-        "<h2 class=\"title\">JM 收藏同步</h2>"
-        + "".join(sync_panel_parts)
-        + "</div>"
-    )
-
-    page_size_options = [12, 24, 36, 60]
-    page_size_html = "".join(
-        (
-            f"<option value=\"{size}\" selected>{size}</option>"
-            if size == page_size
-            else f"<option value=\"{size}\">{size}</option>"
-        )
-        for size in page_size_options
-    )
-
-    pager_html = (
-        "<div class=\"pager\">"
-        "<form class=\"pager-form\" method=\"get\" action=\"/bookshelf\">"
-        "<label style=\"margin:0;color:var(--muted);\">每页</label>"
-        f"<select class=\"select\" style=\"width:96px;min-width:96px;\" name=\"bps\" onchange=\"this.form.submit()\">{page_size_html}</select>"
-        "<input type=\"hidden\" name=\"bp\" value=\"1\" />"
-        "</form>"
-        "<div class=\"pager-links\">"
-        + (
-            f"<a class=\"btn ghost\" href=\"{escape(bookshelf_page_url(page - 1))}\">上一页</a>"
-            if page > 1
-            else "<button class=\"btn ghost\" type=\"button\" disabled>上一页</button>"
-        )
-        + f"<span class=\"subtle\">第 {page}/{page_count} 页</span>"
-        + (
-            f"<a class=\"btn ghost\" href=\"{escape(bookshelf_page_url(page + 1))}\">下一页</a>"
-            if page < page_count
-            else "<button class=\"btn ghost\" type=\"button\" disabled>下一页</button>"
-        )
-        + "</div>"
-        + "</div>"
-    )
-
-    cards: list[str] = []
-    for book in page_books:
-        follow_text = "开启" if book.get("follow_enabled", True) else "关闭"
-        pending = int(book.get("pending_update_count", 0))
-        provider_id = str(book.get("provider_id") or DEFAULT_PROVIDER_ID)
-        provider_badge = render_provider_badge(provider_id)
-        book_title = str(book.get("title") or "未命名漫画")
-        cover_url = str(book.get("cover") or "").strip()
-        if cover_url.startswith("//"):
-            cover_url = f"https:{cover_url}"
-        elif cover_url.startswith("/"):
-            cover_url = urljoin("https://toonily.com", cover_url)
-        if cover_url and not cover_url.startswith(("http://", "https://")):
-            cover_url = ""
-
-        cover_html = (
-            f"<div class=\"result-cover-wrap\"><img class=\"result-cover\" src=\"{escape(cover_url)}\" alt=\"{escape(book['title'])}\" loading=\"lazy\" /></div>"
-            if cover_url
-            else "<div class=\"result-cover-wrap\"><div class=\"result-cover-empty\">暂无封面</div></div>"
-        )
-        hidden_inputs = f"<input type=\"hidden\" name=\"bp\" value=\"{page}\" /><input type=\"hidden\" name=\"bps\" value=\"{page_size}\" />"
-        downloaded_text = (
-            f"已下载：{book.get('last_downloaded_chapter_title') or '-'} "
-            f"/ #{format_chapter_number(book.get('last_downloaded_chapter_number'))}"
-        )
-        latest_text = (
-            f"最新：{book.get('latest_site_chapter_title') or '-'} "
-            f"/ #{format_chapter_number(book.get('latest_site_chapter_number'))}"
-        )
-        summary_text = f"待更新：{pending} | 追更：{follow_text} | 检查：{fmt_time(book.get('last_checked_at', ''))}"
-        cards.append(
-            "<div class=\"book-card\">"
-            f"{cover_html}"
-            f"<h3 class=\"book-title\" title=\"{escape(book_title)}\">{escape(book_title)}</h3>"
-            "<div class=\"book-meta-list\">"
-            f"<div class=\"book-meta\">{provider_badge}</div>"
-            f"<div class=\"book-meta clamp-1\" title=\"{escape(downloaded_text)}\">{escape(downloaded_text)}</div>"
-            f"<div class=\"book-meta clamp-1\" title=\"{escape(latest_text)}\">{escape(latest_text)}</div>"
-            f"<div class=\"book-meta clamp-1\" title=\"{escape(summary_text)}\">{escape(summary_text)}</div>"
-            "</div>"
-            "<div class=\"book-actions\">"
-            f"<form method=\"post\" action=\"/bookshelf/{escape(book['id'])}/check\">{hidden_inputs}<button class=\"btn ghost\" type=\"submit\">检查</button></form>"
-            f"<form method=\"post\" action=\"/bookshelf/{escape(book['id'])}/download_updates\">{hidden_inputs}<button class=\"btn secondary\" type=\"submit\">更新</button></form>"
-            f"<form method=\"post\" action=\"/bookshelf/{escape(book['id'])}/download_all\">{hidden_inputs}<button class=\"btn\" type=\"submit\">全部</button></form>"
-            f"<form method=\"post\" action=\"/bookshelf/{escape(book['id'])}/toggle_follow\">{hidden_inputs}<button class=\"btn ghost\" type=\"submit\">追更</button></form>"
-            f"<form method=\"post\" action=\"/bookshelf/{escape(book['id'])}/remove\" onsubmit=\"return confirm('确认从书架移除？');\">{hidden_inputs}<button class=\"btn warn\" type=\"submit\">移除</button></form>"
-            "</div>"
-            "</div>"
-        )
-
-    if not cards:
-        cards.append("<div class=\"panel\"><div class=\"subtle\">书架为空。请先在主页搜索并加入书架。</div></div>")
-
-    body = (
-        render_message(msg)
-        + sync_panel_html
-        + "<div class=\"panel\"><h2 class=\"title\">书架与追更</h2>"
-        + f"<div class=\"subtle\" style=\"margin-bottom:8px;\">共 {total_books} 本漫画</div>"
-        + pager_html
-        + "<div class=\"bookshelf-grid\">"
-        + "".join(cards)
-        + "</div>"
-        + pager_html
-        + "</div>"
+    body = render_template(
+        "bookshelf.html",
+        message_html=render_message(msg),
+        sync={
+            "jm_enabled": jm_enabled_for_use,
+            "has_jm_login": has_jm_login,
+            "jm_username": state.jm_username,
+            "jm_disabled_reason": jm_reason or "未知原因",
+        },
+        total_books=total_books,
+        follow_count=sum(1 for item in all_books if bool(item.get("follow_enabled", True))),
+        pager={
+            "page": page,
+            "page_count": page_count,
+            "page_size": page_size,
+            "has_prev": page > 1,
+            "has_next": page < page_count,
+            "prev_url": bookshelf_page_url(page - 1),
+            "next_url": bookshelf_page_url(page + 1),
+            "page_size_options": [
+                {"value": size, "selected": size == page_size} for size in (12, 24, 36, 60)
+            ],
+        },
+        books=books,
     )
     return render_layout(title="漫画下载 - 书架", active_nav="bookshelf", body=body)
 
 
+def render_follow(
+    state: UIState,
+    msg: str,
+    *,
+    follow_page: int,
+    follow_page_size: int,
+) -> str:
+    follow_books = [book for book in state.list_books() if bool(book.get("follow_enabled", True))]
+    total_books = len(follow_books)
+    pending_total = sum(max(0, int(book.get("pending_update_count", 0))) for book in follow_books)
+    page_size = max(6, min(60, int(follow_page_size)))
+    page_count = max(1, math.ceil(total_books / page_size)) if total_books else 1
+    page = max(1, min(int(follow_page), page_count))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_books = follow_books[start:end]
+
+    def follow_page_url(target_page: int) -> str:
+        return f"/follow?{urlencode({'fp': str(target_page), 'fps': str(page_size)})}"
+
+    books = [build_book_card_payload(book) for book in page_books]
+
+    body = render_template(
+        "follow.html",
+        message_html=render_message(msg),
+        total_books=total_books,
+        pending_total=pending_total,
+        pager={
+            "page": page,
+            "page_count": page_count,
+            "page_size": page_size,
+            "has_prev": page > 1,
+            "has_next": page < page_count,
+            "prev_url": follow_page_url(page - 1),
+            "next_url": follow_page_url(page + 1),
+            "page_size_options": [
+                {"value": size, "selected": size == page_size} for size in (12, 24, 36, 60)
+            ],
+        },
+        books=books,
+    )
+    return render_layout(title="漫画下载 - 追更", active_nav="follow", body=body)
+
+
 def render_settings(state: UIState, msg: str) -> str:
-    download_section = (
-        "<div class=\"settings-section\">"
-        "<h3 class=\"settings-title\">下载配置</h3>"
-        "<div class=\"settings-grid\">"
-        "<div><label>下载目录</label>"
-        f"<input class=\"input\" name=\"output_dir\" value=\"{escape(str(state.output_dir))}\" /></div>"
-        "<div><label>章节并发</label>"
-        f"<input class=\"input\" name=\"chapter_concurrency\" type=\"number\" min=\"1\" value=\"{state.chapter_concurrency}\" /></div>"
-        "<div><label>图片并发</label>"
-        f"<input class=\"input\" name=\"image_concurrency\" type=\"number\" min=\"1\" value=\"{state.image_concurrency}\" /></div>"
-        "<div><label>重试次数</label>"
-        f"<input class=\"input\" name=\"retries\" type=\"number\" min=\"1\" value=\"{state.retries}\" /></div>"
-        "<div><label>超时（秒）</label>"
-        f"<input class=\"input\" name=\"timeout\" type=\"number\" min=\"10\" value=\"{state.timeout}\" /></div>"
-        "</div>"
-        "</div>"
-    )
-
-    cache_section = (
-        "<div class=\"settings-section\">"
-        "<h3 class=\"settings-title\">缓存配置（Redis）</h3>"
-        "<div class=\"settings-grid\">"
-        "<div><label>Redis URL</label>"
-        f"<input class=\"input\" name=\"redis_url\" value=\"{escape(state.redis_url)}\" placeholder=\"redis://127.0.0.1:6379/0\" /></div>"
-        "<div><label>Redis 用户名（可为空）</label>"
-        f"<input class=\"input\" name=\"redis_username\" value=\"{escape(state.redis_username)}\" /></div>"
-        "<div><label>Redis 密码（可为空）</label>"
-        f"<input class=\"input\" type=\"password\" name=\"redis_password\" value=\"{escape(state.redis_password)}\" autocomplete=\"new-password\" /></div>"
-        "<div><label>缓存 TTL（秒）</label>"
-        f"<input class=\"input\" name=\"cache_ttl_seconds\" type=\"number\" min=\"30\" value=\"{state.cache_ttl_seconds}\" /></div>"
-        "<div><label>缓存开关</label>"
-        "<select class=\"select\" name=\"cache_enabled\">"
-        + ("<option value=\"1\" selected>启用</option>" if state.cache_enabled else "<option value=\"1\">启用</option>")
-        + ("<option value=\"0\">关闭</option>" if state.cache_enabled else "<option value=\"0\" selected>关闭</option>")
-        + "</select></div>"
-        "</div>"
-        "</div>"
-    )
-
-    jm_section = (
-        "<div class=\"settings-section\">"
-        "<h3 class=\"settings-title\">JM 账号</h3>"
-        "<div class=\"settings-grid\">"
-        "<div><label>JM 用户名</label>"
-        f"<input class=\"input\" name=\"jm_username\" value=\"{escape(state.jm_username)}\" autocomplete=\"username\" /></div>"
-        "<div><label>JM 密码</label>"
-        f"<input class=\"input\" type=\"password\" name=\"jm_password\" value=\"{escape(state.jm_password)}\" autocomplete=\"current-password\" /></div>"
-        "</div>"
-        + (
-            "<div class=\"subtle\" style=\"margin-top:8px;\">JM 状态：可用，支持登录与同步收藏。</div>"
-            if JM_PROVIDER_ENABLED
-            else f"<div class=\"subtle\" style=\"margin-top:8px;color:#fecaca;\">JM 状态：不可用（{escape(JM_PROVIDER_DISABLED_REASON or '未知原因')}）。</div>"
+    jm_provider = get_provider("jmcomic")
+    provider_switches: list[dict[str, Any]] = []
+    for provider in list_providers():
+        reason = provider_disabled_reason(state, provider)
+        provider_switches.append(
+            {
+                "id": provider.provider_id,
+                "name": provider.display_name,
+                "checked": state.is_provider_enabled(provider.provider_id),
+                "runtime_available": provider.enabled,
+                "reason": reason,
+            }
         )
-        + "</div>"
-    )
 
-    body = (
-        render_message(msg)
-        + "<div class=\"panel\">"
-        + "<h2 class=\"title\">设置</h2>"
-        + "<form method=\"post\" action=\"/settings\">"
-        + download_section
-        + cache_section
-        + jm_section
-        + "<div style=\"margin-top:12px;\"><button class=\"btn\" type=\"submit\">保存设置</button></div>"
-        + "</form>"
-        + "</div>"
+    body = render_template(
+        "settings.html",
+        message_html=render_message(msg),
+        settings={
+            "output_dir": str(state.output_dir),
+            "chapter_concurrency": state.chapter_concurrency,
+            "image_concurrency": state.image_concurrency,
+            "retries": state.retries,
+            "timeout": state.timeout,
+            "redis_url": state.redis_url,
+            "redis_username": state.redis_username,
+            "redis_password": state.redis_password,
+            "cache_ttl_seconds": state.cache_ttl_seconds,
+            "cache_enabled": state.cache_enabled,
+            "jm_username": state.jm_username,
+            "jm_password": state.jm_password,
+            "jm_enabled": provider_enabled_for_state(state, jm_provider),
+            "jm_disabled_reason": provider_disabled_reason(state, jm_provider) or "未知原因",
+            "provider_switches": provider_switches,
+        },
     )
     return render_layout(title="漫画下载 - 设置", active_nav="settings", body=body)
 
@@ -1843,10 +1727,11 @@ async def run_download_job(state: UIState, job: dict[str, Any]) -> None:
     provider = get_provider(str(job.get("provider_id") or DEFAULT_PROVIDER_ID))
     state.append_job_log(job, f"使用站点：{provider.display_name}")
 
-    if not provider.enabled:
+    reason = provider_disabled_reason(state, provider)
+    if reason:
         job["status"] = "failed"
         job["finished_at"] = now_iso()
-        job["error"] = provider.disabled_reason or "该站点当前未启用。"
+        job["error"] = reason
         state.append_job_log(job, f"任务失败：{job['error']}")
         return
 
@@ -1976,8 +1861,9 @@ async def handle_search(request: web.Request) -> web.StreamResponse:
     provider = get_provider(provider_id)
     if not keyword:
         raise build_redirect("/dashboard", msg="请输入漫画名称。", sp=1, sps=page_size)
-    if not provider.enabled:
-        raise build_redirect("/dashboard", msg=f"{provider.display_name} 暂未启用。", sp=1, sps=page_size)
+    reason = provider_disabled_reason(state, provider)
+    if reason:
+        raise build_redirect("/dashboard", msg=f"{provider.display_name} 不可用：{reason}", sp=1, sps=page_size)
 
     state.last_search_query = keyword
     state.last_search_provider = provider.provider_id
@@ -2007,8 +1893,9 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
 
     if not series_url:
         raise build_redirect("/dashboard", msg="缺少漫画链接。")
-    if not provider.enabled:
-        raise build_redirect("/dashboard", msg=f"{provider.display_name} 暂未启用。")
+    reason = provider_disabled_reason(state, provider)
+    if reason:
+        raise build_redirect("/dashboard", msg=f"{provider.display_name} 不可用：{reason}")
 
     if action == "add_bookshelf":
         book, created = state.upsert_book(
@@ -2074,6 +1961,20 @@ async def handle_bookshelf(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
+async def handle_follow(request: web.Request) -> web.Response:
+    state = get_app_state(request)
+    msg = request.query.get("msg", "").strip()
+    follow_page = parse_int(request.query.get("fp", "1"), 1, minimum=1, maximum=999)
+    follow_page_size = parse_int(request.query.get("fps", "24"), 24, minimum=6, maximum=60)
+    html = render_follow(
+        state,
+        msg,
+        follow_page=follow_page,
+        follow_page_size=follow_page_size,
+    )
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
+
+
 async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.StreamResponse:
     state = get_app_state(request)
     provider = get_provider("jmcomic")
@@ -2081,8 +1982,9 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
     bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
     bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
 
-    if not provider.enabled:
-        raise build_redirect("/bookshelf", msg=f"JM 不可用：{provider.disabled_reason or '未知原因'}", bp=bp, bps=bps)
+    reason = provider_disabled_reason(state, provider)
+    if reason:
+        raise build_redirect("/bookshelf", msg=f"JM 不可用：{reason}", bp=bp, bps=bps)
 
     if not state.jm_username or not state.jm_password:
         raise build_redirect("/settings", msg="请先填写 JM 用户名和密码，再同步收藏。")
@@ -2126,31 +2028,44 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
 async def handle_book_action(request: web.Request) -> web.StreamResponse:
     state = get_app_state(request)
     form = await request.post()
-    bp = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
-    bps = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+    src = str(form.get("src", "bookshelf")).strip().lower()
+    if src == "follow":
+        page = parse_int(form.get("fp", "1"), 1, minimum=1, maximum=999)
+        page_size = parse_int(form.get("fps", "24"), 24, minimum=6, maximum=60)
+        back_path = "/follow"
+        back_params = {"fp": page, "fps": page_size}
+    else:
+        page = parse_int(form.get("bp", "1"), 1, minimum=1, maximum=999)
+        page_size = parse_int(form.get("bps", "24"), 24, minimum=6, maximum=60)
+        back_path = "/bookshelf"
+        back_params = {"bp": page, "bps": page_size}
+
+    def back_redirect(message: str) -> web.HTTPSeeOther:
+        return build_redirect(back_path, msg=message, **back_params)
+
     book_id = request.match_info["book_id"]
     action = request.match_info["action"]
     book = state.get_book(book_id)
     if book is None:
-        raise build_redirect("/bookshelf", msg="书架项目不存在。", bp=bp, bps=bps)
+        raise back_redirect("书架项目不存在。")
 
     if action == "remove":
         state.remove_book(book_id)
         await state.save_bookshelf()
-        raise build_redirect("/bookshelf", msg="已移除。", bp=bp, bps=bps)
+        raise back_redirect("已移除。")
 
     if action == "toggle_follow":
         book["follow_enabled"] = not bool(book.get("follow_enabled", True))
         await state.save_bookshelf()
-        raise build_redirect("/bookshelf", msg=f"追更已{'开启' if book['follow_enabled'] else '关闭'}。", bp=bp, bps=bps)
+        raise back_redirect(f"追更已{'开启' if book['follow_enabled'] else '关闭'}。")
 
     if action == "check":
         try:
             pending = await refresh_book_snapshot(state, book)
             await state.save_bookshelf()
-            raise build_redirect("/bookshelf", msg=f"检查完成，待更新 {len(pending)} 章。", bp=bp, bps=bps)
+            raise back_redirect(f"检查完成，待更新 {len(pending)} 章。")
         except Exception as exc:
-            raise build_redirect("/bookshelf", msg=f"检查失败：{exc}", bp=bp, bps=bps)
+            raise back_redirect(f"检查失败：{exc}")
 
     if action in {"download_updates", "download_all"}:
         chapter_urls: list[str] = []
@@ -2163,7 +2078,7 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
                 book["series_url"],
             )
         except Exception as exc:
-            raise build_redirect("/bookshelf", msg=f"读取章节失败：{exc}", bp=bp, bps=bps)
+            raise back_redirect(f"读取章节失败：{exc}")
 
         if action == "download_updates":
             pending = compute_pending_chapters(book, chapters)
@@ -2173,7 +2088,7 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
                 book["pending_update_count"] = 0
                 book["last_checked_at"] = now_iso()
                 await state.save_bookshelf()
-                raise build_redirect("/bookshelf", msg="没有新的章节需要下载。", bp=bp, bps=bps)
+                raise back_redirect("没有新的章节需要下载。")
             title = f"下载更新：{book['title']} ({len(chapter_urls)} 章)"
         else:
             title = f"下载全部：{book['title']}"
@@ -2190,7 +2105,7 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
         start_job(state, job)
         raise build_redirect("/progress", msg="任务已创建。", job=job["id"])
 
-    raise build_redirect("/bookshelf", msg="未知操作。")
+    raise back_redirect("未知操作。")
 
 async def handle_settings_get(request: web.Request) -> web.Response:
     state = get_app_state(request)
@@ -2215,6 +2130,10 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
         state.cache_enabled = str(form.get("cache_enabled", "1")) == "1"
         state.jm_username = str(form.get("jm_username", state.jm_username)).strip()
         state.jm_password = str(form.get("jm_password", state.jm_password)).strip()
+        enabled_values = []
+        if hasattr(form, "getall"):
+            enabled_values = [str(v).strip().lower() for v in form.getall("enabled_providers") if str(v).strip()]
+        state.set_enabled_providers(set(enabled_values))
         await state.save_settings()
     except Exception as exc:
         raise build_redirect("/settings", msg=f"保存失败：{exc}")
@@ -2274,6 +2193,7 @@ async def on_shutdown(app: web.Application) -> None:
 
 
 def create_app() -> web.Application:
+    ensure_providers_loaded()
     state = UIState()
     state.load()
     state.output_dir.mkdir(parents=True, exist_ok=True)
@@ -2289,6 +2209,7 @@ def create_app() -> web.Application:
             web.post("/search", handle_search),
             web.post("/search/action", handle_search_action),
             web.get("/bookshelf", handle_bookshelf),
+            web.get("/follow", handle_follow),
             web.post("/bookshelf/sync-jm-favorites", handle_bookshelf_sync_jm_favorites),
             web.post("/bookshelf/{book_id}/{action}", handle_book_action),
             web.get("/settings", handle_settings_get),
@@ -2299,20 +2220,3 @@ def create_app() -> web.Application:
     )
     app.on_shutdown.append(on_shutdown)
     return app
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="漫画下载 WebUI")
-    parser.add_argument("--host", default="127.0.0.1", help="WebUI host")
-    parser.add_argument("--port", type=int, default=8000, help="WebUI port")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    app = create_app()
-    web.run_app(app, host=args.host, port=args.port)
-
-
-if __name__ == "__main__":
-    main()
