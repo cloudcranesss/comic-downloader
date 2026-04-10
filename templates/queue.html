@@ -23,11 +23,22 @@
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
     <form method="post" action="/queue/action" style="margin:0;">
       <input type="hidden" name="action" value="retry_all_failed" />
-      <button class="btn secondary" type="submit">重试全部失败任务</button>
+      <button class="btn secondary icon-btn" type="submit" title="重试全部失败任务" aria-label="重试全部失败任务">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">重试全部失败任务</span>
+      </button>
     </form>
     <form method="post" action="/queue/action" onsubmit="return confirm('确认清理所有已结束任务？');" style="margin:0;">
       <input type="hidden" name="action" value="remove_finished" />
-      <button class="btn ghost" type="submit">清理全部已结束任务</button>
+      <button class="btn ghost icon-btn" type="submit" title="清理全部已结束任务" aria-label="清理全部已结束任务">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 7h14M9 7V5h6v2m-7 0l1 12h6l1-12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">清理全部已结束任务</span>
+      </button>
     </form>
   </div>
 </div>
@@ -54,19 +65,34 @@
         <form method="post" action="/queue/action">
           <input type="hidden" name="action" value="move_up" />
           <input type="hidden" name="job_id" value="{{ row.id }}" />
-          <button class="btn ghost" type="submit"{% if not row.can_move_up %} disabled{% endif %}>上移</button>
+          <button class="btn ghost icon-btn" type="submit" title="队列上移" aria-label="队列上移"{% if not row.can_move_up %} disabled{% endif %}>
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 6v12m0-12l-5 5m5-5l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">上移</span>
+          </button>
         </form>
         <form method="post" action="/queue/action">
           <input type="hidden" name="action" value="move_down" />
           <input type="hidden" name="job_id" value="{{ row.id }}" />
-          <button class="btn ghost" type="submit"{% if not row.can_move_down %} disabled{% endif %}>下移</button>
+          <button class="btn ghost icon-btn" type="submit" title="队列下移" aria-label="队列下移"{% if not row.can_move_down %} disabled{% endif %}>
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 18V6m0 12l-5-5m5 5l5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">下移</span>
+          </button>
         </form>
       </div>
     </div>
     {% endfor %}
   </div>
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
-    <button class="btn warn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected">批量取消</button>
+    <button class="btn warn icon-btn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected" title="取消选中任务" aria-label="取消选中任务">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      <span class="btn-text">批量取消</span>
+    </button>
   </div>
   {% else %}
   <div class="subtle">当前没有排队中的任务。</div>
@@ -91,13 +117,24 @@
         <div class="book-meta">开始：{{ row.started_at }}</div>
       </div>
       <div style="margin-top:auto;">
-        <a class="btn ghost" href="/progress?job={{ row.id }}">查看进度</a>
+        <a class="btn ghost icon-btn" href="/progress?job={{ row.id }}" title="查看任务进度" aria-label="查看任务进度">
+          <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          </svg>
+          <span class="btn-text">查看进度</span>
+        </a>
       </div>
     </div>
     {% endfor %}
   </div>
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
-    <button class="btn warn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected">批量取消</button>
+    <button class="btn warn icon-btn" type="submit" form="queue-bulk-form" name="action" value="cancel_selected" title="取消选中任务" aria-label="取消选中任务">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      <span class="btn-text">批量取消</span>
+    </button>
   </div>
   {% else %}
   <div class="subtle">当前没有进行中的任务。</div>
@@ -121,14 +158,30 @@
         <div class="book-meta clamp-1" title="{{ row.error }}">错误：{{ row.error or '未知错误' }}</div>
       </div>
       <div style="margin-top:auto;">
-        <a class="btn ghost" href="/progress?job={{ row.id }}">查看日志</a>
+        <a class="btn ghost icon-btn" href="/progress?job={{ row.id }}" title="查看任务日志" aria-label="查看任务日志">
+          <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 6h16v12H4zM8 10h8M8 14h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+          <span class="btn-text">查看日志</span>
+        </a>
       </div>
     </div>
     {% endfor %}
   </div>
   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
-    <button class="btn secondary" type="submit" form="queue-bulk-form" name="action" value="retry_failed">重试选中失败任务</button>
-    <button class="btn ghost" type="submit" form="queue-bulk-form" name="action" value="remove_finished" onclick="return confirm('确认移除选中的已结束任务？');">移除选中已结束任务</button>
+    <button class="btn secondary icon-btn" type="submit" form="queue-bulk-form" name="action" value="retry_failed" title="重试选中失败任务" aria-label="重试选中失败任务">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="btn-text">重试选中失败任务</span>
+    </button>
+    <button class="btn ghost icon-btn" type="submit" form="queue-bulk-form" name="action" value="remove_finished" onclick="return confirm('确认移除选中的已结束任务？');" title="移除选中的已结束任务" aria-label="移除选中的已结束任务">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 7h14M9 7V5h6v2m-7 0l1 12h6l1-12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      <span class="btn-text">移除选中已结束任务</span>
+    </button>
   </div>
   {% else %}
   <div class="subtle">当前没有失败任务。</div>

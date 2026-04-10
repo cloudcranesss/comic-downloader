@@ -301,6 +301,7 @@ class UIState:
         self.webhook_event_failed = True
         self.webhook_event_cancelled = False
         self.webhook_timeout_seconds = 8
+        self.compact_mode_enabled = False
 
         self.max_job_logs = 600
         self._save_lock = asyncio.Lock()
@@ -358,6 +359,7 @@ class UIState:
                     minimum=3,
                     maximum=30,
                 )
+                self.compact_mode_enabled = parse_bool(raw.get("compact_mode_enabled", self.compact_mode_enabled), self.compact_mode_enabled)
                 if not self.redis_host:
                     legacy_redis_url = str(raw.get("redis_url", "")).strip()
                     if legacy_redis_url:
@@ -450,6 +452,7 @@ class UIState:
             "webhook_event_failed": self.webhook_event_failed,
             "webhook_event_cancelled": self.webhook_event_cancelled,
             "webhook_timeout_seconds": self.webhook_timeout_seconds,
+            "compact_mode_enabled": self.compact_mode_enabled,
             "enabled_providers": sorted(self.enabled_provider_ids),
         }
         async with self._save_lock:
@@ -1545,7 +1548,7 @@ async def scheduler_loop(app: web.Application) -> None:
         finally:
             state._scheduler_running = False
 
-def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -> str:
+def render_layout(*, title: str, active_nav: str, body: str, script: str = "", compact_mode: bool = False) -> str:
     nav_items = [
         ("dashboard", "主页", "/dashboard"),
         ("progress", "进度", "/progress"),
@@ -1582,7 +1585,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "var root=document.documentElement;"
         "function applyTheme(theme){"
         "root.setAttribute('data-theme',theme);"
-        "btn.textContent=theme==='dark'?'主题：深色':'主题：浅色';"
+        "btn.setAttribute('title',theme==='dark'?'当前深色主题，点击切换浅色':'当前浅色主题，点击切换深色');"
         "btn.setAttribute('aria-label',theme==='dark'?'当前深色主题，点击切换浅色':'当前浅色主题，点击切换深色');"
         "}"
         "var saved='';"
@@ -1601,7 +1604,7 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
 
     return (
         "<!doctype html>\n"
-        "<html lang=\"zh-CN\">\n"
+        f"<html lang=\"zh-CN\" data-compact=\"{'1' if compact_mode else '0'}\">\n"
         "<head>\n"
         "  <meta charset=\"utf-8\" />\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
@@ -1692,17 +1695,18 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      box-shadow: 0 8px 18px rgba(15, 111, 255, 0.35);\n"
         "    }\n"
         "    .theme-toggle {\n"
-        "      min-width: 100px;\n"
+        "      min-width: 36px;\n"
         "      justify-content: center;\n"
         "      font-weight: 700;\n"
         "      min-height: 36px;\n"
-        "      padding: 8px 12px;\n"
+        "      padding: 8px;\n"
         "      line-height: 1.2;\n"
         "      align-self: center;\n"
         "      position: relative;\n"
         "      top: -1px;\n"
         "      margin: 0;\n"
         "    }\n"
+        "    .theme-toggle .btn-icon { width: 16px; height: 16px; }\n"
         "    .panel {\n"
         "      background: var(--panel);\n"
         "      border: 1px solid var(--panel-border);\n"
@@ -1763,8 +1767,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }\n"
         "    .result-grid {\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));\n"
-        "      gap: 12px;\n"
+        "      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\n"
+        "      gap: 10px;\n"
         "      align-items: stretch;\n"
         "    }\n"
         "    .search-form { display: grid; grid-template-columns: minmax(220px, 1fr) 220px 140px auto; gap: 10px; align-items: end; }\n"
@@ -1812,21 +1816,43 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "    }\n"
         "    .btn.warn { border-color: var(--danger); background: linear-gradient(135deg, var(--danger), #ef4444); color: #fff; }\n"
         "    .btn[disabled] { opacity: 0.52; cursor: not-allowed; transform: none; }\n"
+        "    .icon-btn {\n"
+        "      min-width: 34px;\n"
+        "      min-height: 34px;\n"
+        "      padding: 8px;\n"
+        "      border-radius: 10px;\n"
+        "      justify-content: center;\n"
+        "      gap: 0;\n"
+        "    }\n"
+        "    .btn-icon {\n"
+        "      width: 14px;\n"
+        "      height: 14px;\n"
+        "      display: inline-block;\n"
+        "      flex: 0 0 auto;\n"
+        "    }\n"
+        "    .btn-text {\n"
+        "      display: inline-block;\n"
+        "      line-height: 1;\n"
+        "    }\n"
+        "    .icon-btn .btn-text { display: none; }\n"
+        "    html[data-compact='1'] .subtle { font-size: 12px; }\n"
         "    .result-card {\n"
         "      border-radius: 14px;\n"
         "      border: 1px solid #dbe3f0;\n"
         "      background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);\n"
-        "      padding: 10px;\n"
+        "      padding: 8px;\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
-        "      gap: 8px;\n"
-        "      min-height: 430px;\n"
+        "      gap: 6px;\n"
+        "      min-height: 360px;\n"
         "      height: 100%;\n"
         "    }\n"
         "    .result-cover-wrap {\n"
-        "      width: 100%;\n"
+        "      width: 88%;\n"
+        "      margin: 0 auto;\n"
         "      aspect-ratio: 3 / 4;\n"
         "      border-radius: 10px;\n"
+        "      max-height: 240px;\n"
         "      overflow: hidden;\n"
         "      background: #edf1f8;\n"
         "      border: 1px solid #dce4f2;\n"
@@ -1846,12 +1872,12 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      letter-spacing: 0.2px;\n"
         "    }\n"
         "    .result-title {\n"
-        "      font-size: 15px;\n"
+        "      font-size: 14px;\n"
         "      font-weight: 800;\n"
         "      line-height: 1.35;\n"
-        "      min-height: calc(1.35em * 3);\n"
+        "      min-height: calc(1.35em * 2);\n"
         "      display: -webkit-box;\n"
-        "      -webkit-line-clamp: 3;\n"
+        "      -webkit-line-clamp: 2;\n"
         "      -webkit-box-orient: vertical;\n"
         "      overflow: hidden;\n"
         "    }\n"
@@ -1913,42 +1939,62 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      line-height: 1.45;\n"
         "    }\n"
         "    .book-card {\n"
-        "      padding: 10px;\n"
+        "      padding: 8px;\n"
         "      border: 1px solid #dbe3f0;\n"
         "      border-radius: 14px;\n"
         "      background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);\n"
         "      display: flex;\n"
         "      flex-direction: column;\n"
-        "      gap: 8px;\n"
+        "      gap: 6px;\n"
         "      height: 100%;\n"
-        "      min-height: 430px;\n"
+        "      min-height: 360px;\n"
         "    }\n"
         "    .bookshelf-grid {\n"
         "      display: grid;\n"
-        "      grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));\n"
-        "      gap: 12px;\n"
+        "      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\n"
+        "      gap: 10px;\n"
         "      align-items: stretch;\n"
         "    }\n"
         "    .book-card .result-cover-wrap {\n"
-        "      width: 100%;\n"
-        "      margin: 0 0 8px;\n"
+        "      width: 88%;\n"
+        "      margin: 0 auto 6px;\n"
         "    }\n"
         "    .book-title {\n"
         "      margin: 0;\n"
-        "      font-size: 15px;\n"
+        "      font-size: 14px;\n"
         "      line-height: 1.35;\n"
-        "      min-height: calc(1.35em * 3);\n"
+        "      min-height: calc(1.35em * 2);\n"
         "      display: -webkit-box;\n"
-        "      -webkit-line-clamp: 3;\n"
+        "      -webkit-line-clamp: 2;\n"
         "      -webkit-box-orient: vertical;\n"
         "      overflow: hidden;\n"
         "    }\n"
         "    .book-meta-list { display: flex; flex-direction: column; gap: 4px; }\n"
         "    .book-meta { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.4; }\n"
         "    .book-meta.clamp-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
-        "    .book-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: auto; }\n"
-        "    .book-actions form { margin: 0; min-width: 0; }\n"
-        "    .book-actions .btn { padding: 8px 10px; min-height: 36px; font-size: 12px; width: 100%; }\n"
+        "    .book-actions {\n"
+        "      display: flex;\n"
+        "      align-items: center;\n"
+        "      gap: 4px;\n"
+        "      flex-wrap: nowrap;\n"
+        "      margin-top: auto;\n"
+        "    }\n"
+        "    .book-actions form {\n"
+        "      margin: 0;\n"
+        "      min-width: 0;\n"
+        "      flex: 0 0 auto;\n"
+        "    }\n"
+        "    .book-actions .btn {\n"
+        "      width: 28px;\n"
+        "      min-width: 28px;\n"
+        "      min-height: 28px;\n"
+        "      padding: 5px;\n"
+        "      border-radius: 8px;\n"
+        "    }\n"
+        "    .book-actions .btn-icon {\n"
+        "      width: 13px;\n"
+        "      height: 13px;\n"
+        "    }\n"
         "    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }\n"
         "    .stat-card {\n"
         "      border: 1px solid #dbe3f0;\n"
@@ -2107,9 +2153,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }\n"
         "      .bookshelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }\n"
         "      .result-card,\n"
-        "      .book-card { min-height: 390px; }\n"
-        "      .actions,\n"
-        "      .book-actions { grid-template-columns: 1fr; }\n"
+        "      .book-card { min-height: 330px; }\n"
+        "      .actions { grid-template-columns: 1fr; }\n"
         "      .settings-grid { grid-template-columns: 1fr; }\n"
         "    }\n"
         "  </style>\n"
@@ -2120,7 +2165,12 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "") -
         "      <div class=\"logo\">漫画下载</div>\n"
         "      <div class=\"top-actions\">\n"
         f"        <nav class=\"nav\">{nav_html}</nav>\n"
-        "        <button class=\"btn ghost theme-toggle\" id=\"theme-toggle\" type=\"button\">主题</button>\n"
+        "        <button class=\"btn ghost icon-btn theme-toggle\" id=\"theme-toggle\" type=\"button\" title=\"切换主题\" aria-label=\"切换主题\">"
+        "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+        "<path d=\"M12 3a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1zm0 15a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm8-5a1 1 0 0 1 1 1 1 1 0 0 1-1 1h-1a1 1 0 1 1 0-2zm-14 0a1 1 0 1 1 0 2H5a1 1 0 1 1 0-2zm10.66-6.66a1 1 0 0 1 1.41 0l.7.7a1 1 0 1 1-1.41 1.41l-.7-.7a1 1 0 0 1 0-1.41zM7.34 16.66a1 1 0 0 1 1.41 0l.7.7a1 1 0 1 1-1.41 1.41l-.7-.7a1 1 0 0 1 0-1.41zm11.43 0a1 1 0 0 1 0 1.41l-.7.7a1 1 0 1 1-1.41-1.41l.7-.7a1 1 0 0 1 1.41 0zM8.75 6.34a1 1 0 0 1 0 1.41l-.7.7A1 1 0 0 1 6.64 7.04l.7-.7a1 1 0 0 1 1.41 0z\" fill=\"currentColor\"/>"
+        "</svg>"
+        "<span class=\"btn-text\">主题</span>"
+        "</button>\n"
         "      </div>\n"
         "    </div>\n"
         f"    {body}\n"
@@ -2177,9 +2227,27 @@ def render_job_panel(job: dict[str, Any], *, heading: str, full_page: bool = Fal
     progress_jump = (
         ""
         if full_page
-        else f"<a class=\"btn ghost\" href=\"/progress?job={escape(job['id'])}\">打开完整进度界面</a>"
+        else (
+            f"<a class=\"btn ghost icon-btn\" href=\"/progress?job={escape(job['id'])}\" "
+            "title=\"打开完整进度界面\" aria-label=\"打开完整进度界面\">"
+            "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+            "<path d=\"M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"/>"
+            "<circle cx=\"12\" cy=\"12\" r=\"2.5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"/>"
+            "</svg>"
+            "<span class=\"btn-text\">打开完整进度界面</span>"
+            "</a>"
+        )
     )
-    back_home = "<a class=\"btn ghost\" href=\"/dashboard\">返回主页</a>" if full_page else ""
+    back_home = (
+        "<a class=\"btn ghost icon-btn\" href=\"/dashboard\" title=\"返回主页\" aria-label=\"返回主页\">"
+        "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+        "<path d=\"M4 11.5 12 5l8 6.5V20h-5v-5H9v5H4z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linejoin=\"round\"/>"
+        "</svg>"
+        "<span class=\"btn-text\">返回主页</span>"
+        "</a>"
+        if full_page
+        else ""
+    )
     retry_text = f"失败重试清单：{retry_file}" if retry_file else ""
     provider_text = provider_name(str(job.get("provider_id") or DEFAULT_PROVIDER_ID))
 
@@ -2222,9 +2290,24 @@ def render_job_panel(job: dict[str, Any], *, heading: str, full_page: bool = Fal
         "<div class=\"progress\"><div class=\"bar\" id=\"image-bar\" "
         f"style=\"width:{image_pct}%;\"></div></div>"
         "<div class=\"actions\">"
-        "<button id=\"btn-pause\" class=\"btn ghost\" type=\"button\">暂停</button>"
-        "<button id=\"btn-resume\" class=\"btn secondary\" type=\"button\">继续</button>"
-        "<button id=\"btn-cancel\" class=\"btn warn\" type=\"button\">取消</button>"
+        "<button id=\"btn-pause\" class=\"btn ghost icon-btn\" type=\"button\" title=\"暂停任务\" aria-label=\"暂停任务\">"
+        "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+        "<path d=\"M8 6v12M16 6v12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+        "</svg>"
+        "<span class=\"btn-text\">暂停</span>"
+        "</button>"
+        "<button id=\"btn-resume\" class=\"btn secondary icon-btn\" type=\"button\" title=\"继续任务\" aria-label=\"继续任务\">"
+        "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+        "<path d=\"M8 6l10 6-10 6z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linejoin=\"round\"/>"
+        "</svg>"
+        "<span class=\"btn-text\">继续</span>"
+        "</button>"
+        "<button id=\"btn-cancel\" class=\"btn warn icon-btn\" type=\"button\" title=\"取消任务\" aria-label=\"取消任务\">"
+        "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+        "<path d=\"M6 6l12 12M18 6 6 18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+        "</svg>"
+        "<span class=\"btn-text\">取消</span>"
+        "</button>"
         f"{progress_jump}"
         f"{back_home}"
         "</div>"
@@ -2444,7 +2527,13 @@ def render_dashboard(
         results=results,
         job_html=job_html,
     )
-    return render_layout(title="漫画下载 - 主页", active_nav="dashboard", body=body, script=script)
+    return render_layout(
+        title="漫画下载 - 主页",
+        active_nav="dashboard",
+        body=body,
+        script=script,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
@@ -2460,7 +2549,14 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
             "<div class=\"panel\">"
             "<h2 class=\"title\">任务进度</h2>"
             "<div class=\"subtle\">当前没有活跃任务。请前往主页搜索漫画并创建下载任务。</div>"
-            "<div style=\"margin-top:10px;\"><a class=\"btn\" href=\"/dashboard\">去主页创建任务</a></div>"
+            "<div style=\"margin-top:10px;\">"
+            "<a class=\"btn icon-btn\" href=\"/dashboard\" title=\"去主页创建任务\" aria-label=\"去主页创建任务\">"
+            "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+            "<path d=\"M4 11.5 12 5l8 6.5V20h-5v-5H9v5H4z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linejoin=\"round\"/>"
+            "</svg>"
+            "<span class=\"btn-text\">去主页创建任务</span>"
+            "</a>"
+            "</div>"
             "</div>"
         )
     else:
@@ -2473,7 +2569,13 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
         progress_content_html=progress_content_html,
     )
 
-    return render_layout(title="漫画下载 - 进度", active_nav="progress", body=body, script=script)
+    return render_layout(
+        title="漫画下载 - 进度",
+        active_nav="progress",
+        body=body,
+        script=script,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def render_queue(state: UIState, msg: str) -> str:
@@ -2542,7 +2644,12 @@ def render_queue(state: UIState, msg: str) -> str:
         running_rows=running_rows,
         failed_rows=failed_rows,
     )
-    return render_layout(title="漫画下载 - 队列", active_nav="queue", body=body)
+    return render_layout(
+        title="漫画下载 - 队列",
+        active_nav="queue",
+        body=body,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def normalize_cover_url(value: Any) -> str:
@@ -2668,7 +2775,12 @@ def render_bookshelf(
         },
         books=books,
     )
-    return render_layout(title="漫画下载 - 书架", active_nav="bookshelf", body=body)
+    return render_layout(
+        title="漫画下载 - 书架",
+        active_nav="bookshelf",
+        body=body,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def render_follow(
@@ -2712,7 +2824,12 @@ def render_follow(
         },
         books=books,
     )
-    return render_layout(title="漫画下载 - 追更", active_nav="follow", body=body)
+    return render_layout(
+        title="漫画下载 - 追更",
+        active_nav="follow",
+        body=body,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def render_health(state: UIState, msg: str) -> str:
@@ -2758,7 +2875,12 @@ def render_health(state: UIState, msg: str) -> str:
         recent_summary=recent_summary,
         recent_items=recent_items,
     )
-    return render_layout(title="漫画下载 - 监控", active_nav="health", body=body)
+    return render_layout(
+        title="漫画下载 - 监控",
+        active_nav="health",
+        body=body,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def render_settings(state: UIState, msg: str) -> str:
@@ -2822,12 +2944,18 @@ def render_settings(state: UIState, msg: str) -> str:
             "webhook_event_failed": state.webhook_event_failed,
             "webhook_event_cancelled": state.webhook_event_cancelled,
             "webhook_timeout_seconds": state.webhook_timeout_seconds,
+            "compact_mode_enabled": state.compact_mode_enabled,
             "jm_enabled": provider_enabled_for_state(state, jm_provider),
             "jm_disabled_reason": provider_disabled_reason(state, jm_provider) or "未知原因",
             "provider_switches": provider_switches,
         },
     )
-    return render_layout(title="漫画下载 - 设置", active_nav="settings", body=body)
+    return render_layout(
+        title="漫画下载 - 设置",
+        active_nav="settings",
+        body=body,
+        compact_mode=state.compact_mode_enabled,
+    )
 
 
 def job_controls(job: dict[str, Any]) -> dict[str, bool]:
@@ -3837,6 +3965,7 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
             minimum=3,
             maximum=30,
         )
+        state.compact_mode_enabled = str(form.get("compact_mode_enabled", "0")).strip() == "1"
         enabled_values = []
         if hasattr(form, "getall"):
             enabled_values = [str(v).strip().lower() for v in form.getall("enabled_providers") if str(v).strip()]

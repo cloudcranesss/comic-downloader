@@ -15,7 +15,13 @@
         <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>每页 {{ opt.value }}</option>
         {% endfor %}
       </select>
-      <button class="btn" type="submit">搜索</button>
+      <button class="btn icon-btn" type="submit" title="搜索漫画" aria-label="搜索漫画">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          <path d="M16 16l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">搜索</span>
+      </button>
     </form>
   </div>
 
@@ -49,7 +55,12 @@
         <textarea class="input" name="import_text" rows="5" placeholder="每行一个链接，或粘贴 JSON/CSV 内容"></textarea>
       </div>
       <div style="margin-top:10px;">
-        <button class="btn secondary" type="submit">开始批量导入</button>
+        <button class="btn secondary icon-btn" type="submit" title="开始批量导入" aria-label="开始批量导入">
+          <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="btn-text">开始批量导入</span>
+        </button>
       </div>
     </form>
   </div>
@@ -74,15 +85,35 @@
     </form>
     <div class="pager-links">
       {% if results.has_prev %}
-      <a class="btn ghost" href="{{ results.prev_url }}">上一页</a>
+      <a class="btn ghost icon-btn" href="{{ results.prev_url }}" title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </a>
       {% else %}
-      <button class="btn ghost" type="button" disabled>上一页</button>
+      <button class="btn ghost icon-btn" type="button" disabled title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </button>
       {% endif %}
       <span class="subtle">第 {{ results.page }}/{{ results.page_count }} 页</span>
       {% if results.has_next %}
-      <a class="btn ghost" href="{{ results.next_url }}">下一页</a>
+      <a class="btn ghost icon-btn" href="{{ results.next_url }}" title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </a>
       {% else %}
-      <button class="btn ghost" type="button" disabled>下一页</button>
+      <button class="btn ghost icon-btn" type="button" disabled title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </button>
       {% endif %}
     </div>
   </div>
@@ -108,14 +139,25 @@
           <input type="hidden" name="sp" value="{{ results.page }}" />
           <input type="hidden" name="sps" value="{{ results.page_size }}" />
           <input type="hidden" name="action" value="add_bookshelf" />
-          <button class="btn ghost" type="submit">加入书架</button>
+          <button class="btn ghost icon-btn" type="submit" title="加入书架" aria-label="加入书架">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5h10a2 2 0 0 1 2 2v12H6a2 2 0 0 0-2 2V5z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M18 9v8M14 13h8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <span class="btn-text">加入书架</span>
+          </button>
         </form>
         <form method="post" action="/search/action">
           <input type="hidden" name="provider_id" value="{{ item.provider_id }}" />
           <input type="hidden" name="title" value="{{ item.title }}" />
           <input type="hidden" name="url" value="{{ item.url }}" />
           <input type="hidden" name="action" value="download_all" />
-          <button class="btn secondary" type="submit">下载全部</button>
+          <button class="btn secondary icon-btn" type="submit" title="下载全部章节" aria-label="下载全部章节">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">下载全部</span>
+          </button>
         </form>
         <form method="post" action="/search/action">
           <input type="hidden" name="provider_id" value="{{ item.provider_id }}" />
@@ -123,7 +165,13 @@
           <input type="hidden" name="url" value="{{ item.url }}" />
           <input type="hidden" name="cover" value="{{ item.cover_url }}" />
           <input type="hidden" name="action" value="follow_download" />
-          <button class="btn" type="submit">追更下载</button>
+          <button class="btn icon-btn" type="submit" title="加入追更并下载更新" aria-label="加入追更并下载更新">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">追更下载</span>
+          </button>
         </form>
       </div>
     </div>

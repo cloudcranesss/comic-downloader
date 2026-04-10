@@ -24,24 +24,45 @@
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
       <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-      <button class="btn ghost" type="submit">手动登录</button>
+      <button class="btn ghost icon-btn" type="submit" title="JM 手动登录" aria-label="JM 手动登录">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm-7 8a7 7 0 0 1 14 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">手动登录</span>
+      </button>
     </form>
     <form method="post" action="/bookshelf/jm-logout" style="margin:0;">
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
       <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-      <button class="btn ghost" type="submit"{% if not sync.manual_logged_in %} disabled{% endif %}>退出登录</button>
+      <button class="btn ghost icon-btn" type="submit"{% if not sync.manual_logged_in %} disabled{% endif %} title="JM 退出登录" aria-label="JM 退出登录">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M15 8l4 4-4 4M19 12H9M5 5h6v14H5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">退出登录</span>
+      </button>
     </form>
     <form method="post" action="/bookshelf/sync-jm-favorites" style="margin:0;">
       <input type="hidden" name="bp" value="{{ pager.page }}" />
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
       <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-      <button class="btn secondary" type="submit">同步 JM 收藏到书架</button>
+      <button class="btn secondary icon-btn" type="submit" title="同步 JM 收藏到书架" aria-label="同步 JM 收藏到书架">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">同步 JM 收藏到书架</span>
+      </button>
     </form>
   </div>
   {% else %}
   <div style="display:flex;justify-content:flex-end;">
-    <a class="btn ghost" href="/settings">去设置 JM 账号</a>
+    <a class="btn ghost icon-btn" href="/settings" title="前往设置 JM 账号" aria-label="前往设置 JM 账号">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8 4-2 1 1 2-2 2-2-1-1 2h-4l-1-2-2 1-2-2 1-2-2-1v-4l2-1-1-2 2-2 2 1 1-2h4l1 2 2-1 2 2-1 2 2 1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+      <span class="btn-text">去设置 JM 账号</span>
+    </a>
   </div>
   {% endif %}
   {% else %}
@@ -53,7 +74,14 @@
   <h2 class="title">书架管理</h2>
   <div class="subtle" style="margin-bottom:8px;">
     当前展示 {{ total_books }} 本漫画（书架总计 {{ all_books_count }} 本），已开启追更 {{ follow_count }} 本。
-    更新检查与增量下载请前往 <a class="btn ghost" href="/follow">追更页</a>
+    更新检查与增量下载请前往
+    <a class="btn ghost icon-btn" href="/follow" title="前往追更页" aria-label="前往追更页">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="btn-text">追更页</span>
+    </a>
   </div>
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 10px;">
     <form class="pager-form" method="get" action="/bookshelf">
@@ -68,13 +96,23 @@
       <input type="hidden" name="bps" value="{{ pager.page_size }}" />
     </form>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <a class="btn ghost" href="/bookshelf/export">导出书架</a>
+      <a class="btn ghost icon-btn" href="/bookshelf/export" title="导出书架 JSON" aria-label="导出书架 JSON">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">导出书架</span>
+      </a>
       <form method="post" action="/bookshelf/import" enctype="multipart/form-data" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0;">
         <input type="hidden" name="bp" value="{{ pager.page }}" />
         <input type="hidden" name="bps" value="{{ pager.page_size }}" />
         <input type="hidden" name="bg" value="{{ group_filter.value }}" />
         <input class="input" type="file" name="bookshelf_file" accept=".json,application/json" style="max-width:220px;min-height:38px;padding:6px 10px;" />
-        <button class="btn ghost" type="submit">导入书架</button>
+        <button class="btn ghost icon-btn" type="submit" title="导入书架 JSON" aria-label="导入书架 JSON">
+          <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 20V9m0 0l-4 4m4-4l4 4M5 5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="btn-text">导入书架</span>
+        </button>
       </form>
     </div>
   </div>
@@ -85,17 +123,53 @@
   </form>
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <button class="btn ghost" type="button" id="bulk-select-all">全选</button>
-      <button class="btn ghost" type="button" id="bulk-select-invert">反选</button>
-      <button class="btn ghost" type="button" id="bulk-select-clear">清空</button>
+      <button class="btn ghost icon-btn" type="button" id="bulk-select-all" title="全选当前页" aria-label="全选当前页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 12l4 4 10-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">全选</span>
+      </button>
+      <button class="btn ghost icon-btn" type="button" id="bulk-select-invert" title="反选当前页" aria-label="反选当前页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 7h10v10H7zM4 4h4M16 4h4M4 16h4M16 20h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">反选</span>
+      </button>
+      <button class="btn ghost icon-btn" type="button" id="bulk-select-clear" title="清空选择" aria-label="清空选择">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">清空</span>
+      </button>
       <span class="subtle">已选择 <span id="bulk-selected-count">0</span> 本</span>
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <button class="btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_download_all">一键下载</button>
-      <button class="btn secondary" type="submit" form="bulk-form" name="bulk_action" value="bulk_follow_download">一键追更下载</button>
-      <button class="btn ghost" type="submit" form="bulk-form" name="bulk_action" value="bulk_enable_follow">仅开启追更</button>
+      <button class="btn icon-btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_download_all" title="批量下载全部章节" aria-label="批量下载全部章节">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">一键下载</span>
+      </button>
+      <button class="btn secondary icon-btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_follow_download" title="批量追更下载" aria-label="批量追更下载">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">一键追更下载</span>
+      </button>
+      <button class="btn ghost icon-btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_enable_follow" title="仅开启追更开关" aria-label="仅开启追更开关">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 12h16M12 4v16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">仅开启追更</span>
+      </button>
       <input class="input" name="bulk_group_name" form="bulk-form" placeholder="分组名（留空=未分组）" style="width:180px;min-width:180px;min-height:38px;" />
-      <button class="btn ghost" type="submit" form="bulk-form" name="bulk_action" value="bulk_set_group">批量分组</button>
+      <button class="btn ghost icon-btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_set_group" title="批量设置分组" aria-label="批量设置分组">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 6h16M4 12h16M4 18h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">批量分组</span>
+      </button>
     </div>
   </div>
 
@@ -126,21 +200,37 @@
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
           <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-          <button class="btn" type="submit">全部</button>
+          <button class="btn icon-btn" type="submit" title="下载全部章节" aria-label="下载全部章节">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">全部</span>
+          </button>
         </form>
         <form method="post" action="/bookshelf/{{ book.id }}/toggle_follow">
           <input type="hidden" name="src" value="bookshelf" />
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
           <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-          <button class="btn secondary" type="submit">{{ book.follow_button_text }}</button>
+          <button class="btn secondary icon-btn" type="submit" title="{{ book.follow_button_text }}" aria-label="{{ book.follow_button_text }}">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-text">{{ book.follow_button_text }}</span>
+          </button>
         </form>
         <form method="post" action="/bookshelf/{{ book.id }}/remove" onsubmit="return confirm('确认从书架移除？');">
           <input type="hidden" name="src" value="bookshelf" />
           <input type="hidden" name="bp" value="{{ pager.page }}" />
           <input type="hidden" name="bps" value="{{ pager.page_size }}" />
           <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-          <button class="btn warn" type="submit">移除</button>
+          <button class="btn warn icon-btn" type="submit" title="从书架移除" aria-label="从书架移除">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 7h14M9 7V5h6v2m-7 0l1 12h6l1-12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <span class="btn-text">移除</span>
+          </button>
         </form>
       </div>
     </div>
@@ -163,15 +253,35 @@
     </form>
     <div class="pager-links">
       {% if pager.has_prev %}
-      <a class="btn ghost" href="{{ pager.prev_url }}">上一页</a>
+      <a class="btn ghost icon-btn" href="{{ pager.prev_url }}" title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </a>
       {% else %}
-      <button class="btn ghost" type="button" disabled>上一页</button>
+      <button class="btn ghost icon-btn" type="button" disabled title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </button>
       {% endif %}
       <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
       {% if pager.has_next %}
-      <a class="btn ghost" href="{{ pager.next_url }}">下一页</a>
+      <a class="btn ghost icon-btn" href="{{ pager.next_url }}" title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </a>
       {% else %}
-      <button class="btn ghost" type="button" disabled>下一页</button>
+      <button class="btn ghost icon-btn" type="button" disabled title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </button>
       {% endif %}
     </div>
   </div>

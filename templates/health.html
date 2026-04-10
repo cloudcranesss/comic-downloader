@@ -12,7 +12,13 @@
     {% if scheduler.running %}| 当前状态：执行中{% endif %}
   </div>
   <form method="post" action="/scheduler/run">
-    <button class="btn secondary" type="submit">立即执行一次计划任务</button>
+    <button class="btn secondary icon-btn" type="submit" title="立即执行一次计划任务" aria-label="立即执行一次计划任务">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="btn-text">立即执行一次计划任务</span>
+    </button>
   </form>
 </div>
 
@@ -96,7 +102,13 @@
       <div class="subtle clamp-1" style="margin-top:4px;color:#b91c1c;" title="{{ row.error }}">错误：{{ row.error }}</div>
       {% endif %}
       <div style="margin-top:8px;">
-        <a class="btn ghost" href="/progress?job={{ row.job_id }}">查看详情</a>
+        <a class="btn ghost icon-btn" href="/progress?job={{ row.job_id }}" title="查看任务详情" aria-label="查看任务详情">
+          <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          </svg>
+          <span class="btn-text">查看详情</span>
+        </a>
       </div>
     </div>
     {% endfor %}

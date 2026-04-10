@@ -6,6 +6,13 @@
       <h3 class="settings-title">基础下载</h3>
       <div class="settings-grid">
         <div><label>下载目录</label><input class="input" name="output_dir" value="{{ settings.output_dir }}" /></div>
+        <div>
+          <label>界面密度</label>
+          <select class="select" name="compact_mode_enabled">
+            <option value="1"{% if settings.compact_mode_enabled %} selected{% endif %}>紧凑模式（推荐小屏）</option>
+            <option value="0"{% if not settings.compact_mode_enabled %} selected{% endif %}>标准模式</option>
+          </select>
+        </div>
         <div><label>任务并行数</label><input class="input" name="max_parallel_jobs" type="number" min="1" max="20" value="{{ settings.max_parallel_jobs }}" /></div>
         <div><label>章节并发</label><input class="input" name="chapter_concurrency" type="number" min="1" value="{{ settings.chapter_concurrency }}" /></div>
         <div><label>图片并发</label><input class="input" name="image_concurrency" type="number" min="1" value="{{ settings.image_concurrency }}" /></div>
@@ -209,7 +216,14 @@
       <div class="subtle" style="margin-top:8px;">推送包含任务标题、状态、站点、章节统计、错误信息等字段。</div>
     </div>
 
-    <div style="margin-top:12px;"><button class="btn" type="submit">保存设置</button></div>
+    <div style="margin-top:12px;">
+      <button class="btn icon-btn" type="submit" title="保存设置" aria-label="保存设置">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 4h11l3 3v13H5zM8 4v6h8V4M8 20v-6h8v6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">保存设置</span>
+      </button>
+    </div>
   </form>
 </div>
 
