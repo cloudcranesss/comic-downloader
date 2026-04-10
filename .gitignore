@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime data
+downloads/
+bookshelf.json
+webui_settings.json
+
+# Local env / editor
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+
