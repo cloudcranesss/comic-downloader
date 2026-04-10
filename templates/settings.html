@@ -13,6 +13,13 @@
             <option value="0"{% if not settings.compact_mode_enabled %} selected{% endif %}>标准模式</option>
           </select>
         </div>
+        <div>
+          <label>漫画显示模式</label>
+          <select class="select" name="manga_view_mode">
+            <option value="poster"{% if settings.manga_view_mode == "poster" %} selected{% endif %}>海报模式</option>
+            <option value="list"{% if settings.manga_view_mode == "list" %} selected{% endif %}>列表模式</option>
+          </select>
+        </div>
         <div><label>任务并行数</label><input class="input" name="max_parallel_jobs" type="number" min="1" max="20" value="{{ settings.max_parallel_jobs }}" /></div>
         <div><label>章节并发</label><input class="input" name="chapter_concurrency" type="number" min="1" value="{{ settings.chapter_concurrency }}" /></div>
         <div><label>图片并发</label><input class="input" name="image_concurrency" type="number" min="1" value="{{ settings.image_concurrency }}" /></div>

@@ -1,5 +1,6 @@
-{{ message_html | safe }}
+﻿{{ message_html | safe }}
 
+<div class="follow-page">
 <div class="panel">
   <h2 class="title">追更中心</h2>
   <div class="subtle" style="margin-bottom:8px;">
@@ -12,11 +13,56 @@
       <span class="btn-text">书架页</span>
     </a>
   </div>
+  <form id="follow-bulk-form" method="post" action="/follow/bulk" style="display:none;">
+    <input type="hidden" name="fp" value="{{ pager.page }}" />
+    <input type="hidden" name="fps" value="{{ pager.page_size }}" />
+  </form>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="btn ghost icon-btn" type="button" id="follow-mode-toggle" title="开启多选模式" aria-label="开启多选模式" aria-pressed="false">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 6h16M4 12h16M4 18h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">多选</span>
+      </button>
+      <div id="follow-mode-controls" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="btn ghost icon-btn" type="button" id="follow-select-all" title="全选当前页" aria-label="全选当前页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 12l4 4 10-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">全选</span>
+      </button>
+      <button class="btn ghost icon-btn" type="button" id="follow-select-invert" title="反选当前页" aria-label="反选当前页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 7h10v10H7zM4 4h4M16 4h4M4 16h4M16 20h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">反选</span>
+      </button>
+      <button class="btn ghost icon-btn" type="button" id="follow-select-clear" title="清空选择" aria-label="清空选择">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">清空</span>
+      </button>
+      <span class="subtle">已选择 <span id="follow-selected-count">0</span> 本</span>
+    </div>
+      </div>
+    <button id="follow-mode-action" class="btn warn icon-btn" style="display:none;" type="submit" form="follow-bulk-form" name="bulk_action" value="bulk_disable_follow" title="一键取消选中漫画追更" aria-label="一键取消选中漫画追更">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5l14 14M19 5L5 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      <span class="btn-text">一键取消追更</span>
+    </button>
+  </div>
 
   <div class="bookshelf-grid">
     {% if books %}
     {% for book in books %}
     <div class="book-card">
+      <label class="follow-check-label" style="display:none;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+        <input class="follow-book-check" type="checkbox" name="book_ids" value="{{ book.id }}" form="follow-bulk-form" />
+        选择
+      </label>
       {% if book.cover_url %}
       <div class="result-cover-wrap"><img class="result-cover" src="{{ book.cover_url }}" alt="{{ book.title }}" loading="lazy" /></div>
       {% else %}
@@ -142,3 +188,60 @@
     </div>
   </div>
 </div>
+<script>
+  (function () {
+    const checks = Array.from(document.querySelectorAll('.follow-book-check'));
+    const checkLabels = Array.from(document.querySelectorAll('.follow-check-label'));
+    const countEl = document.getElementById('follow-selected-count');
+    const modeToggle = document.getElementById('follow-mode-toggle');
+    const modeControls = document.getElementById('follow-mode-controls');
+    const modeAction = document.getElementById('follow-mode-action');
+    const btnAll = document.getElementById('follow-select-all');
+    const btnInvert = document.getElementById('follow-select-invert');
+    const btnClear = document.getElementById('follow-select-clear');
+    const bulkForm = document.getElementById('follow-bulk-form');
+    if (!countEl || !bulkForm) return;
+    let multiSelectEnabled = false;
+
+    function updateCount() {
+      const selected = checks.filter((item) => item.checked).length;
+      countEl.textContent = String(selected);
+    }
+
+    function setMultiSelectEnabled(enabled) {
+      multiSelectEnabled = enabled;
+      if (modeToggle) {
+        modeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        modeToggle.setAttribute('title', enabled ? '关闭多选模式' : '开启多选模式');
+        modeToggle.setAttribute('aria-label', enabled ? '关闭多选模式' : '开启多选模式');
+        const text = modeToggle.querySelector('.btn-text');
+        if (text) text.textContent = enabled ? '完成' : '多选';
+      }
+      if (modeControls) modeControls.style.display = enabled ? 'flex' : 'none';
+      if (modeAction) modeAction.style.display = enabled ? 'inline-flex' : 'none';
+      checkLabels.forEach((label) => { label.style.display = enabled ? 'flex' : 'none'; });
+      checks.forEach((item) => {
+        item.disabled = !enabled;
+        if (!enabled) item.checked = false;
+      });
+      updateCount();
+    }
+
+    if (modeToggle) modeToggle.addEventListener('click', function () { setMultiSelectEnabled(!multiSelectEnabled); });
+    checks.forEach((item) => item.addEventListener('change', updateCount));
+    if (btnAll) btnAll.addEventListener('click', function () { checks.forEach((item) => { item.checked = true; }); updateCount(); });
+    if (btnInvert) btnInvert.addEventListener('click', function () { checks.forEach((item) => { item.checked = !item.checked; }); updateCount(); });
+    if (btnClear) btnClear.addEventListener('click', function () { checks.forEach((item) => { item.checked = false; }); updateCount(); });
+    bulkForm.addEventListener('submit', function (event) {
+      if (!multiSelectEnabled || !checks.some((item) => item.checked)) {
+        event.preventDefault();
+        alert('请先开启多选并选择至少一本漫画。');
+      }
+    });
+    setMultiSelectEnabled(false);
+  })();
+</script>
+</div>
+
+
+

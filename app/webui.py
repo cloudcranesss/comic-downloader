@@ -302,6 +302,7 @@ class UIState:
         self.webhook_event_cancelled = False
         self.webhook_timeout_seconds = 8
         self.compact_mode_enabled = False
+        self.manga_view_mode = "poster"
 
         self.max_job_logs = 600
         self._save_lock = asyncio.Lock()
@@ -360,6 +361,8 @@ class UIState:
                     maximum=30,
                 )
                 self.compact_mode_enabled = parse_bool(raw.get("compact_mode_enabled", self.compact_mode_enabled), self.compact_mode_enabled)
+                raw_view_mode = str(raw.get("manga_view_mode", self.manga_view_mode)).strip().lower()
+                self.manga_view_mode = raw_view_mode if raw_view_mode in {"poster", "list"} else "poster"
                 if not self.redis_host:
                     legacy_redis_url = str(raw.get("redis_url", "")).strip()
                     if legacy_redis_url:
@@ -453,6 +456,7 @@ class UIState:
             "webhook_event_cancelled": self.webhook_event_cancelled,
             "webhook_timeout_seconds": self.webhook_timeout_seconds,
             "compact_mode_enabled": self.compact_mode_enabled,
+            "manga_view_mode": self.manga_view_mode,
             "enabled_providers": sorted(self.enabled_provider_ids),
         }
         async with self._save_lock:
@@ -1548,7 +1552,15 @@ async def scheduler_loop(app: web.Application) -> None:
         finally:
             state._scheduler_running = False
 
-def render_layout(*, title: str, active_nav: str, body: str, script: str = "", compact_mode: bool = False) -> str:
+def render_layout(
+    *,
+    title: str,
+    active_nav: str,
+    body: str,
+    script: str = "",
+    compact_mode: bool = False,
+    manga_view_mode: str = "poster",
+) -> str:
     nav_items = [
         ("dashboard", "主页", "/dashboard"),
         ("progress", "进度", "/progress"),
@@ -1604,7 +1616,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
 
     return (
         "<!doctype html>\n"
-        f"<html lang=\"zh-CN\" data-compact=\"{'1' if compact_mode else '0'}\">\n"
+        f"<html lang=\"zh-CN\" data-compact=\"{'1' if compact_mode else '0'}\" "
+        f"data-view-mode=\"{escape(manga_view_mode if manga_view_mode in {'poster', 'list'} else 'poster')}\">\n"
         "<head>\n"
         "  <meta charset=\"utf-8\" />\n"
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
@@ -1817,12 +1830,11 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "    .btn.warn { border-color: var(--danger); background: linear-gradient(135deg, var(--danger), #ef4444); color: #fff; }\n"
         "    .btn[disabled] { opacity: 0.52; cursor: not-allowed; transform: none; }\n"
         "    .icon-btn {\n"
-        "      min-width: 34px;\n"
         "      min-height: 34px;\n"
-        "      padding: 8px;\n"
+        "      padding: 8px 10px;\n"
         "      border-radius: 10px;\n"
         "      justify-content: center;\n"
-        "      gap: 0;\n"
+        "      gap: 6px;\n"
         "    }\n"
         "    .btn-icon {\n"
         "      width: 14px;\n"
@@ -1834,7 +1846,31 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "      display: inline-block;\n"
         "      line-height: 1;\n"
         "    }\n"
-        "    .icon-btn .btn-text { display: none; }\n"
+        "    .icon-btn .btn-text {\n"
+        "      display: inline-block;\n"
+        "      max-width: 96px;\n"
+        "      overflow: hidden;\n"
+        "      text-overflow: ellipsis;\n"
+        "      white-space: nowrap;\n"
+        "      font-size: 12px;\n"
+        "    }\n"
+        "    .actions .icon-btn,\n"
+        "    .book-actions .icon-btn,\n"
+        "    .job-actions .icon-btn,\n"
+        "    html[data-view-mode='list'] .book-card > .book-actions .icon-btn,\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .icon-btn {\n"
+        "      min-width: 28px;\n"
+        "      min-height: 28px;\n"
+        "      padding: 5px;\n"
+        "      gap: 0;\n"
+        "    }\n"
+        "    .actions .icon-btn .btn-text,\n"
+        "    .book-actions .icon-btn .btn-text,\n"
+        "    .job-actions .icon-btn .btn-text,\n"
+        "    html[data-view-mode='list'] .book-card > .book-actions .icon-btn .btn-text,\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .icon-btn .btn-text {\n"
+        "      display: none;\n"
+        "    }\n"
         "    html[data-compact='1'] .subtle { font-size: 12px; }\n"
         "    .result-card {\n"
         "      border-radius: 14px;\n"
@@ -1898,9 +1934,14 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "      min-height: 1.4em;\n"
         "    }\n"
         "    .link:hover { text-decoration: underline; }\n"
-        "    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: auto; }\n"
+        "    .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: auto; }\n"
         "    .actions form { margin: 0; min-width: 0; }\n"
         "    .actions .btn { width: 100%; }\n"
+        "    .job-actions {\n"
+        "      grid-template-columns: repeat(3, minmax(0, 1fr));\n"
+        "      gap: 6px;\n"
+        "      margin-top: 10px;\n"
+        "    }\n"
         "    .job-meta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; color: var(--muted); }\n"
         "    .badge {\n"
         "      display: inline-block;\n"
@@ -1973,19 +2014,19 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "    .book-meta { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.4; }\n"
         "    .book-meta.clamp-1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n"
         "    .book-actions {\n"
-        "      display: flex;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: repeat(3, minmax(0, 1fr));\n"
         "      align-items: center;\n"
         "      gap: 4px;\n"
-        "      flex-wrap: nowrap;\n"
         "      margin-top: auto;\n"
         "    }\n"
         "    .book-actions form {\n"
         "      margin: 0;\n"
         "      min-width: 0;\n"
-        "      flex: 0 0 auto;\n"
+        "      width: 100%;\n"
         "    }\n"
         "    .book-actions .btn {\n"
-        "      width: 28px;\n"
+        "      width: 100%;\n"
         "      min-width: 28px;\n"
         "      min-height: 28px;\n"
         "      padding: 5px;\n"
@@ -1994,6 +2035,186 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "    .book-actions .btn-icon {\n"
         "      width: 13px;\n"
         "      height: 13px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-grid,\n"
+        "    html[data-view-mode='list'] .bookshelf-grid {\n"
+        "      grid-template-columns: 1fr;\n"
+        "      gap: 10px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card {\n"
+        "      display: grid;\n"
+        "      grid-template-columns: 78px minmax(0, 1fr) auto;\n"
+        "      grid-template-areas:\n"
+        "        'cover title actions'\n"
+        "        'cover provider actions'\n"
+        "        'cover link actions'\n"
+        "        'cover latest actions';\n"
+        "      column-gap: 12px;\n"
+        "      row-gap: 3px;\n"
+        "      min-height: 0;\n"
+        "      align-items: start;\n"
+        "      padding: 10px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .result-cover-wrap {\n"
+        "      grid-area: cover;\n"
+        "      width: 78px;\n"
+        "      max-height: 104px;\n"
+        "      margin: 0;\n"
+        "      border-radius: 8px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .result-title {\n"
+        "      grid-area: title;\n"
+        "      min-height: 0;\n"
+        "      -webkit-line-clamp: 2;\n"
+        "      font-size: 14px;\n"
+        "      margin-top: 1px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > div:not(.result-cover-wrap):not(.result-title):not(.result-link):not(.result-latest):not(.actions) {\n"
+        "      grid-area: provider;\n"
+        "      margin-top: 1px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .result-link {\n"
+        "      grid-area: link;\n"
+        "      min-height: 0;\n"
+        "      -webkit-line-clamp: 1;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .result-latest {\n"
+        "      grid-area: latest;\n"
+        "      min-height: 0;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .actions {\n"
+        "      grid-area: actions;\n"
+        "      margin: 0;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: repeat(2, 28px);\n"
+        "      justify-content: center;\n"
+        "      align-content: center;\n"
+        "      gap: 5px;\n"
+        "      align-self: center;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .result-card > .actions .btn {\n"
+        "      width: 28px;\n"
+        "      min-width: 28px;\n"
+        "      min-height: 28px;\n"
+        "      padding: 5px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card {\n"
+        "      display: grid;\n"
+        "      grid-template-columns: 78px minmax(0, 1fr) auto;\n"
+        "      grid-template-areas:\n"
+        "        'cover select actions'\n"
+        "        'cover title actions'\n"
+        "        'cover group actions'\n"
+        "        'cover metas actions';\n"
+        "      column-gap: 12px;\n"
+        "      row-gap: 3px;\n"
+        "      min-height: 0;\n"
+        "      align-items: start;\n"
+        "      padding: 10px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .result-cover-wrap {\n"
+        "      grid-area: cover;\n"
+        "      width: 78px;\n"
+        "      max-height: 104px;\n"
+        "      margin: 0;\n"
+        "      border-radius: 8px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > label {\n"
+        "      grid-area: select;\n"
+        "      margin: 0;\n"
+        "      gap: 6px;\n"
+        "      font-size: 12px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .book-title {\n"
+        "      grid-area: title;\n"
+        "      margin: 0;\n"
+        "      min-height: 0;\n"
+        "      -webkit-line-clamp: 2;\n"
+        "      font-size: 14px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .book-meta {\n"
+        "      grid-area: group;\n"
+        "      margin: 0;\n"
+        "      font-size: 12px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .book-meta-list {\n"
+        "      grid-area: metas;\n"
+        "      margin: 0;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: repeat(2, minmax(0, 1fr));\n"
+        "      column-gap: 10px;\n"
+        "      row-gap: 2px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .book-actions {\n"
+        "      grid-area: actions;\n"
+        "      margin: 0;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: repeat(2, 28px);\n"
+        "      justify-content: center;\n"
+        "      align-content: center;\n"
+        "      gap: 5px;\n"
+        "      align-self: center;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .book-card > .book-actions .btn {\n"
+        "      width: 28px;\n"
+        "      min-width: 28px;\n"
+        "      min-height: 28px;\n"
+        "      padding: 5px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card {\n"
+        "      grid-template-columns: 78px minmax(0, 1fr) auto;\n"
+        "      grid-template-areas:\n"
+        "        'cover select actions'\n"
+        "        'cover title actions'\n"
+        "        'cover metas actions';\n"
+        "      column-gap: 12px;\n"
+        "      row-gap: 4px;\n"
+        "      padding: 10px;\n"
+        "      min-height: 0;\n"
+        "      align-items: start;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .result-cover-wrap {\n"
+        "      grid-area: cover;\n"
+        "      width: 78px;\n"
+        "      max-height: 104px;\n"
+        "      margin: 0;\n"
+        "      border-radius: 8px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > label {\n"
+        "      grid-area: select;\n"
+        "      margin: 0;\n"
+        "      gap: 6px;\n"
+        "      font-size: 12px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-title {\n"
+        "      grid-area: title;\n"
+        "      margin: 0;\n"
+        "      min-height: 0;\n"
+        "      -webkit-line-clamp: 2;\n"
+        "      font-size: 14px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-meta-list {\n"
+        "      grid-area: metas;\n"
+        "      margin: 0;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: 1fr;\n"
+        "      row-gap: 2px;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-actions {\n"
+        "      grid-area: actions;\n"
+        "      margin: 0;\n"
+        "      display: grid;\n"
+        "      grid-template-columns: repeat(2, 28px);\n"
+        "      justify-content: center;\n"
+        "      align-content: center;\n"
+        "      gap: 5px;\n"
+        "      align-self: center;\n"
+        "    }\n"
+        "    html[data-view-mode='list'] .follow-page .book-card > .book-actions .btn {\n"
+        "      width: 28px;\n"
+        "      min-width: 28px;\n"
+        "      min-height: 28px;\n"
+        "      padding: 5px;\n"
         "    }\n"
         "    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }\n"
         "    .stat-card {\n"
@@ -2154,7 +2375,8 @@ def render_layout(*, title: str, active_nav: str, body: str, script: str = "", c
         "      .bookshelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }\n"
         "      .result-card,\n"
         "      .book-card { min-height: 330px; }\n"
-        "      .actions { grid-template-columns: 1fr; }\n"
+        "      .actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n"
+        "      .job-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n"
         "      .settings-grid { grid-template-columns: 1fr; }\n"
         "    }\n"
         "  </style>\n"
@@ -2289,7 +2511,7 @@ def render_job_panel(job: dict[str, Any], *, heading: str, full_page: bool = Fal
         f"{job['saved_images']}/{job['total_images']}</span></div>"
         "<div class=\"progress\"><div class=\"bar\" id=\"image-bar\" "
         f"style=\"width:{image_pct}%;\"></div></div>"
-        "<div class=\"actions\">"
+        "<div class=\"actions job-actions\">"
         "<button id=\"btn-pause\" class=\"btn ghost icon-btn\" type=\"button\" title=\"暂停任务\" aria-label=\"暂停任务\">"
         "<svg class=\"btn-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
         "<path d=\"M8 6v12M16 6v12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
@@ -2404,7 +2626,6 @@ def render_job_panel(job: dict[str, Any], *, heading: str, full_page: bool = Fal
 def render_dashboard(
     state: UIState,
     msg: str,
-    selected_job_id: str,
     *,
     search_page: int,
     search_page_size: int,
@@ -2428,8 +2649,6 @@ def render_dashboard(
 
         def dashboard_page_url(target_page: int) -> str:
             params: dict[str, str] = {"sp": str(target_page), "sps": str(page_size)}
-            if selected_job_id:
-                params["job"] = selected_job_id
             return f"/dashboard?{urlencode(params)}"
 
         items: list[dict[str, Any]] = []
@@ -2465,7 +2684,6 @@ def render_dashboard(
             "page": page,
             "page_count": page_count,
             "page_size": page_size,
-            "selected_job_id": selected_job_id,
             "has_prev": page > 1,
             "has_next": page < page_count,
             "prev_url": dashboard_page_url(page - 1),
@@ -2475,11 +2693,6 @@ def render_dashboard(
             ],
             "items": items,
         }
-
-    job_html = "<div class=\"panel\"><h2 class=\"title\">当前任务</h2><div class=\"subtle\">暂无任务，可在搜索结果中直接创建下载。</div></div>"
-    script = ""
-    if selected_job_id and selected_job_id in state.jobs:
-        job_html, script = render_job_panel(state.jobs[selected_job_id], heading="当前任务", full_page=False)
 
     provider_options: list[dict[str, Any]] = []
     for provider in list_providers():
@@ -2525,14 +2738,13 @@ def render_dashboard(
         import_provider_options=import_provider_options,
         search_page_size_options=search_page_size_options,
         results=results,
-        job_html=job_html,
     )
     return render_layout(
         title="漫画下载 - 主页",
         active_nav="dashboard",
         body=body,
-        script=script,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2575,6 +2787,7 @@ def render_progress(state: UIState, msg: str, selected_job_id: str) -> str:
         body=body,
         script=script,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2649,6 +2862,7 @@ def render_queue(state: UIState, msg: str) -> str:
         active_nav="queue",
         body=body,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2780,6 +2994,7 @@ def render_bookshelf(
         active_nav="bookshelf",
         body=body,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2829,6 +3044,7 @@ def render_follow(
         active_nav="follow",
         body=body,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2880,6 +3096,7 @@ def render_health(state: UIState, msg: str) -> str:
         active_nav="health",
         body=body,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -2945,6 +3162,7 @@ def render_settings(state: UIState, msg: str) -> str:
             "webhook_event_cancelled": state.webhook_event_cancelled,
             "webhook_timeout_seconds": state.webhook_timeout_seconds,
             "compact_mode_enabled": state.compact_mode_enabled,
+            "manga_view_mode": state.manga_view_mode,
             "jm_enabled": provider_enabled_for_state(state, jm_provider),
             "jm_disabled_reason": provider_disabled_reason(state, jm_provider) or "未知原因",
             "provider_switches": provider_switches,
@@ -2955,6 +3173,7 @@ def render_settings(state: UIState, msg: str) -> str:
         active_nav="settings",
         body=body,
         compact_mode=state.compact_mode_enabled,
+        manga_view_mode=state.manga_view_mode,
     )
 
 
@@ -3117,13 +3336,11 @@ async def handle_root(_: web.Request) -> web.StreamResponse:
 async def handle_dashboard(request: web.Request) -> web.Response:
     state = get_app_state(request)
     msg = pop_flash_message(request)
-    selected_job_id = request.query.get("job", "").strip() or (state.current_job_id or "")
     search_page = parse_int(request.query.get("sp", "1"), 1, minimum=1, maximum=999)
     search_page_size = parse_int(request.query.get("sps", "12"), 12, minimum=4, maximum=40)
     html = render_dashboard(
         state,
         msg,
-        selected_job_id,
         search_page=search_page,
         search_page_size=search_page_size,
     )
@@ -3334,7 +3551,7 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
             provider_id=provider.provider_id,
         )
         dispatch_jobs(state)
-        raise build_redirect("/progress", msg="下载任务已创建。", job=job["id"])
+        raise build_redirect("/dashboard", msg="下载任务已创建。", sp=sp, sps=sps)
 
     if action == "follow_download":
         book, _ = state.upsert_book(
@@ -3354,7 +3571,7 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
             provider_id=provider.provider_id,
         )
         dispatch_jobs(state)
-        raise build_redirect("/progress", msg="已加入书架并创建追更下载任务。", job=job["id"])
+        raise build_redirect("/dashboard", msg="已加入书架并创建追更下载任务。", sp=sp, sps=sps)
 
     raise build_redirect("/dashboard", msg="未知操作。")
 
@@ -3517,6 +3734,40 @@ async def handle_follow(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
+async def handle_follow_bulk(request: web.Request) -> web.StreamResponse:
+    state = get_app_state(request)
+    form = await request.post()
+    page = parse_int(form.get("fp", "1"), 1, minimum=1, maximum=999)
+    page_size = parse_int(form.get("fps", "24"), 24, minimum=6, maximum=60)
+    bulk_action = str(form.get("bulk_action", "")).strip().lower()
+    selected_ids = list(dict.fromkeys(form_getall_str(form, "book_ids")))
+
+    def back_redirect(message: str) -> web.HTTPSeeOther:
+        return build_redirect("/follow", msg=message, fp=page, fps=page_size)
+
+    if not selected_ids:
+        raise back_redirect("请先选择至少一本漫画。")
+
+    selected_books: list[dict[str, Any]] = []
+    for book_id in selected_ids:
+        book = state.get_book(book_id)
+        if book is not None:
+            selected_books.append(book)
+    if not selected_books:
+        raise back_redirect("所选项目不存在或已被移除。")
+
+    if bulk_action == "bulk_disable_follow":
+        changed = 0
+        for book in selected_books:
+            if bool(book.get("follow_enabled", True)):
+                book["follow_enabled"] = False
+                changed += 1
+        await state.save_bookshelf()
+        raise back_redirect(f"已取消 {changed} 本漫画的追更。")
+
+    raise back_redirect("未知批量操作。")
+
+
 async def handle_health(request: web.Request) -> web.Response:
     state = get_app_state(request)
     msg = pop_flash_message(request)
@@ -3633,20 +3884,26 @@ async def handle_bookshelf_sync_jm_favorites(request: web.Request) -> web.Stream
 
     created = 0
     updated = 0
+    created_follow_off = 0
     for item in favorites:
-        _, is_created = state.upsert_book(
+        book, is_created = state.upsert_book(
             provider_id="jmcomic",
             title=str(item.get("title") or "").strip(),
             series_url=str(item.get("url") or "").strip(),
             cover=str(item.get("cover") or "").strip(),
         )
         if is_created:
+            if bool(book.get("follow_enabled", True)):
+                book["follow_enabled"] = False
+                created_follow_off += 1
             created += 1
         else:
             updated += 1
 
     await state.save_bookshelf()
-    raise back(f"JM 收藏同步完成：共 {len(favorites)} 条，新增 {created}，更新 {updated}。")
+    raise back(
+        f"JM 收藏同步完成：共 {len(favorites)} 条，新增 {created}（默认关闭追更 {created_follow_off}），更新 {updated}。"
+    )
 
 
 async def enqueue_book_updates_job(
@@ -3751,7 +4008,6 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
         queued = 0
         unchanged = 0
         failed_titles: list[str] = []
-        last_job_id = ""
         for book in selected_books:
             if not bool(book.get("follow_enabled", True)):
                 book["follow_enabled"] = True
@@ -3763,7 +4019,6 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
             )
             if created:
                 queued += 1
-                last_job_id = detail
             elif detail:
                 failed_titles.append(f"{book.get('title') or '未命名漫画'}：{detail}")
             else:
@@ -3778,13 +4033,10 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
             msg += f"，失败 {len(failed_titles)} 本"
         msg += "。"
 
-        if queued and last_job_id:
-            raise build_redirect("/progress", msg=msg, job=last_job_id)
         raise back_redirect(msg)
 
     if bulk_action == "bulk_download_all":
         queued = 0
-        last_job_id = ""
         for book in selected_books:
             title = f"下载全部：{book.get('title') or '未命名漫画'}"
             job = state.create_job(
@@ -3797,10 +4049,9 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
                 provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
             )
             queued += 1
-            last_job_id = str(job["id"])
         dispatch_jobs(state)
-        if last_job_id:
-            raise build_redirect("/progress", msg=f"已为 {queued} 本漫画创建下载任务。", job=last_job_id)
+        if queued:
+            raise back_redirect(f"已为 {queued} 本漫画创建下载任务。")
         raise back_redirect("未能创建下载任务，请稍后重试。")
 
     if bulk_action == "bulk_set_group":
@@ -3896,7 +4147,7 @@ async def handle_book_action(request: web.Request) -> web.StreamResponse:
             provider_id=str(book.get("provider_id") or DEFAULT_PROVIDER_ID),
         )
         dispatch_jobs(state)
-        raise build_redirect("/progress", msg="任务已创建。", job=job["id"])
+        raise back_redirect("任务已创建。")
 
     raise back_redirect("未知操作。")
 
@@ -3966,6 +4217,8 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
             maximum=30,
         )
         state.compact_mode_enabled = str(form.get("compact_mode_enabled", "0")).strip() == "1"
+        view_mode = str(form.get("manga_view_mode", state.manga_view_mode)).strip().lower()
+        state.manga_view_mode = view_mode if view_mode in {"poster", "list"} else "poster"
         enabled_values = []
         if hasattr(form, "getall"):
             enabled_values = [str(v).strip().lower() for v in form.getall("enabled_providers") if str(v).strip()]
@@ -4065,7 +4318,7 @@ async def handle_queue_action(request: web.Request) -> web.StreamResponse:
             last_job_id = str(new_job.get("id") or "")
         dispatch_jobs(state)
         if retried and last_job_id:
-            raise build_redirect("/progress", msg=f"已重试 {retried} 个任务。", job=last_job_id)
+            raise build_redirect("/queue", msg=f"已重试 {retried} 个任务。")
         raise build_redirect("/queue", msg="没有可重试的失败任务。")
 
     if action == "remove_finished":
@@ -4199,6 +4452,7 @@ def create_app() -> web.Application:
             web.post("/bookshelf/jm-login", handle_bookshelf_jm_login),
             web.post("/bookshelf/jm-logout", handle_bookshelf_jm_logout),
             web.get("/follow", handle_follow),
+            web.post("/follow/bulk", handle_follow_bulk),
             web.get("/health", handle_health),
             web.post("/bookshelf/sync-jm-favorites", handle_bookshelf_sync_jm_favorites),
             web.post("/bookshelf/bulk", handle_bookshelf_bulk),

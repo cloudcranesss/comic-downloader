@@ -79,9 +79,6 @@
         {% endfor %}
       </select>
       <input type="hidden" name="sp" value="1" />
-      {% if results.selected_job_id %}
-      <input type="hidden" name="job" value="{{ results.selected_job_id }}" />
-      {% endif %}
     </form>
     <div class="pager-links">
       {% if results.has_prev %}
@@ -179,5 +176,3 @@
   </div>
 </div>
 {% endif %}
-
-{{ job_html | safe }}

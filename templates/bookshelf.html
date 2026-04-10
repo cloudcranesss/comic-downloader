@@ -1,4 +1,4 @@
-{{ message_html | safe }}
+﻿{{ message_html | safe }}
 
 <div class="panel">
   <h2 class="title">JM 收藏同步</h2>
@@ -116,6 +116,51 @@
       </form>
     </div>
   </div>
+  <div class="pager" style="margin-top:0;">
+    <form class="pager-form" method="get" action="/bookshelf">
+      <label style="margin:0;color:var(--muted);">每页</label>
+      <select class="select" style="width:96px;min-width:96px;" name="bps" onchange="this.form.submit()">
+        {% for opt in pager.page_size_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="bp" value="1" />
+      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
+    </form>
+    <div class="pager-links">
+      {% if pager.has_prev %}
+      <a class="btn ghost icon-btn" href="{{ pager.prev_url }}" title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </a>
+      {% else %}
+      <button class="btn ghost icon-btn" type="button" disabled title="上一页" aria-label="上一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">上一页</span>
+      </button>
+      {% endif %}
+      <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
+      {% if pager.has_next %}
+      <a class="btn ghost icon-btn" href="{{ pager.next_url }}" title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </a>
+      {% else %}
+      <button class="btn ghost icon-btn" type="button" disabled title="下一页" aria-label="下一页">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="btn-text">下一页</span>
+      </button>
+      {% endif %}
+    </div>
+  </div>
   <form id="bulk-form" method="post" action="/bookshelf/bulk" style="display:none;">
     <input type="hidden" name="bp" value="{{ pager.page }}" />
     <input type="hidden" name="bps" value="{{ pager.page_size }}" />
@@ -123,6 +168,13 @@
   </form>
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="btn ghost icon-btn" type="button" id="bulk-mode-toggle" title="开启多选模式" aria-label="开启多选模式" aria-pressed="false">
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 6h16M4 12h16M4 18h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span class="btn-text">多选</span>
+      </button>
+      <div id="bulk-mode-controls" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;">
       <button class="btn ghost icon-btn" type="button" id="bulk-select-all" title="全选当前页" aria-label="全选当前页">
         <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M5 12l4 4 10-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -143,7 +195,8 @@
       </button>
       <span class="subtle">已选择 <span id="bulk-selected-count">0</span> 本</span>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      </div>
+    <div id="bulk-mode-actions" style="display:none;align-items:center;gap:8px;flex-wrap:wrap;">
       <button class="btn icon-btn" type="submit" form="bulk-form" name="bulk_action" value="bulk_download_all" title="批量下载全部章节" aria-label="批量下载全部章节">
         <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -177,7 +230,7 @@
     {% if books %}
     {% for book in books %}
     <div class="book-card">
-      <label style="display:flex;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
+      <label class="bulk-check-label" style="display:none;align-items:center;gap:8px;margin:0 0 4px;color:var(--muted);font-size:12px;cursor:pointer;">
         <input class="bulk-book-check" type="checkbox" name="book_ids" value="{{ book.id }}" form="bulk-form" />
         选择
       </label>
@@ -240,77 +293,60 @@
     {% endif %}
   </div>
 
-  <div class="pager">
-    <form class="pager-form" method="get" action="/bookshelf">
-      <label style="margin:0;color:var(--muted);">每页</label>
-      <select class="select" style="width:96px;min-width:96px;" name="bps" onchange="this.form.submit()">
-        {% for opt in pager.page_size_options %}
-        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.value }}</option>
-        {% endfor %}
-      </select>
-      <input type="hidden" name="bp" value="1" />
-      <input type="hidden" name="bg" value="{{ group_filter.value }}" />
-    </form>
-    <div class="pager-links">
-      {% if pager.has_prev %}
-      <a class="btn ghost icon-btn" href="{{ pager.prev_url }}" title="上一页" aria-label="上一页">
-        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="btn-text">上一页</span>
-      </a>
-      {% else %}
-      <button class="btn ghost icon-btn" type="button" disabled title="上一页" aria-label="上一页">
-        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M14 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="btn-text">上一页</span>
-      </button>
-      {% endif %}
-      <span class="subtle">第 {{ pager.page }}/{{ pager.page_count }} 页</span>
-      {% if pager.has_next %}
-      <a class="btn ghost icon-btn" href="{{ pager.next_url }}" title="下一页" aria-label="下一页">
-        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="btn-text">下一页</span>
-      </a>
-      {% else %}
-      <button class="btn ghost icon-btn" type="button" disabled title="下一页" aria-label="下一页">
-        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M10 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="btn-text">下一页</span>
-      </button>
-      {% endif %}
-    </div>
-  </div>
 </div>
 <script>
   (function () {
     const checks = Array.from(document.querySelectorAll('.bulk-book-check'));
+    const checkLabels = Array.from(document.querySelectorAll('.bulk-check-label'));
     const countEl = document.getElementById('bulk-selected-count');
+    const modeToggle = document.getElementById('bulk-mode-toggle');
+    const modeControls = document.getElementById('bulk-mode-controls');
+    const modeActions = document.getElementById('bulk-mode-actions');
     const btnAll = document.getElementById('bulk-select-all');
     const btnInvert = document.getElementById('bulk-select-invert');
     const btnClear = document.getElementById('bulk-select-clear');
     const bulkForm = document.getElementById('bulk-form');
     if (!countEl || !bulkForm) return;
+    let multiSelectEnabled = false;
 
     function updateCount() {
       const selected = checks.filter((item) => item.checked).length;
       countEl.textContent = String(selected);
     }
 
+    function setMultiSelectEnabled(enabled) {
+      multiSelectEnabled = enabled;
+      if (modeToggle) {
+        modeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        modeToggle.setAttribute('title', enabled ? '关闭多选模式' : '开启多选模式');
+        modeToggle.setAttribute('aria-label', enabled ? '关闭多选模式' : '开启多选模式');
+        const text = modeToggle.querySelector('.btn-text');
+        if (text) text.textContent = enabled ? '完成' : '多选';
+      }
+      if (modeControls) modeControls.style.display = enabled ? 'flex' : 'none';
+      if (modeActions) modeActions.style.display = enabled ? 'flex' : 'none';
+      checkLabels.forEach((label) => { label.style.display = enabled ? 'flex' : 'none'; });
+      checks.forEach((item) => {
+        item.disabled = !enabled;
+        if (!enabled) item.checked = false;
+      });
+      updateCount();
+    }
+
+    if (modeToggle) modeToggle.addEventListener('click', function () { setMultiSelectEnabled(!multiSelectEnabled); });
     checks.forEach((item) => item.addEventListener('change', updateCount));
     if (btnAll) btnAll.addEventListener('click', function () { checks.forEach((item) => { item.checked = true; }); updateCount(); });
     if (btnInvert) btnInvert.addEventListener('click', function () { checks.forEach((item) => { item.checked = !item.checked; }); updateCount(); });
     if (btnClear) btnClear.addEventListener('click', function () { checks.forEach((item) => { item.checked = false; }); updateCount(); });
     bulkForm.addEventListener('submit', function (event) {
-      if (!checks.some((item) => item.checked)) {
+      if (!multiSelectEnabled || !checks.some((item) => item.checked)) {
         event.preventDefault();
-        alert('请先选择至少一本漫画。');
+        alert('请先开启多选并选择至少一本漫画。');
       }
     });
-    updateCount();
+    setMultiSelectEnabled(false);
   })();
 </script>
+
+
+
