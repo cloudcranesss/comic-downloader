@@ -5,6 +5,9 @@ __pycache__/
 
 # Runtime data
 downloads/
+data/
+!data/.gitkeep
+data/*.json
 bookshelf.json
 webui_settings.json
 
@@ -14,4 +17,3 @@ webui_settings.json
 venv/
 .idea/
 .vscode/
-

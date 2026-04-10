@@ -68,6 +68,14 @@ def normalize_url(url: str) -> str:
     return url.strip().rstrip("/")
 
 
+def parse_int_or_default(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
+
+
 def parse_chapter_number(title: str) -> Optional[float]:
     match = re.search(r"chapter\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
     if not match:
@@ -155,7 +163,9 @@ class ToonilyAsyncDownloader:
         pause_waiter: Optional[Callable[[], Awaitable[None]]] = None,
         cancel_checker: Optional[Callable[[], bool]] = None,
         cache_enabled: bool = True,
-        redis_url: Optional[str] = None,
+        redis_host: Optional[str] = None,
+        redis_port: int = 6379,
+        redis_db: int = 0,
         redis_username: Optional[str] = None,
         redis_password: Optional[str] = None,
         cache_ttl_seconds: int = 900,
@@ -176,19 +186,20 @@ class ToonilyAsyncDownloader:
         self.pause_waiter = pause_waiter
         self.cancel_checker = cancel_checker
         self.cache_enabled = bool(cache_enabled)
-        self.redis_url = (
-            (redis_url or "").strip()
-            or os.getenv("TOONILY_REDIS_URL", "").strip()
-            or os.getenv("REDIS_URL", "").strip()
+        self.redis_host = (
+            (redis_host or "").strip()
+            or os.getenv("REDIS_HOST", "").strip()
         )
+        env_port = os.getenv("REDIS_PORT", "6379")
+        env_db = os.getenv("REDIS_DB", "0")
+        self.redis_port = parse_int_or_default(redis_port, parse_int_or_default(env_port, 6379, minimum=1, maximum=65535), minimum=1, maximum=65535)
+        self.redis_db = parse_int_or_default(redis_db, parse_int_or_default(env_db, 0, minimum=0, maximum=999999), minimum=0, maximum=999999)
         self.redis_username = (
             (redis_username or "").strip()
-            or os.getenv("TOONILY_REDIS_USERNAME", "").strip()
             or os.getenv("REDIS_USERNAME", "").strip()
         )
         self.redis_password = (
             (redis_password or "").strip()
-            or os.getenv("TOONILY_REDIS_PASSWORD", "").strip()
             or os.getenv("REDIS_PASSWORD", "").strip()
         )
         self.cache_ttl_seconds = max(30, int(cache_ttl_seconds))
@@ -247,8 +258,8 @@ class ToonilyAsyncDownloader:
     async def _get_redis(self) -> Optional[Redis]:  # type: ignore[valid-type]
         if not self.cache_enabled:
             return None
-        if not self.redis_url:
-            self._disable_cache("redis_url not configured")
+        if not self.redis_host:
+            self._disable_cache("redis_host not configured")
             return None
         if Redis is None:
             self._disable_cache("redis package not installed")
@@ -257,8 +268,10 @@ class ToonilyAsyncDownloader:
             return self._redis
 
         try:
-            client = Redis.from_url(  # type: ignore[attr-defined]
-                self.redis_url,
+            client = Redis(  # type: ignore[call-arg]
+                host=self.redis_host,
+                port=self.redis_port,
+                db=self.redis_db,
                 decode_responses=True,
                 username=self.redis_username or None,
                 password=self.redis_password or None,
@@ -740,9 +753,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Timeout seconds per request",
     )
     parser.add_argument(
-        "--redis-url",
+        "--redis-host",
         default="",
-        help="Redis URL for HTML cache, e.g. redis://127.0.0.1:6379/0",
+        help="Redis host for HTML cache, e.g. 127.0.0.1",
+    )
+    parser.add_argument(
+        "--redis-port",
+        type=int,
+        default=6379,
+        help="Redis port (default: 6379)",
+    )
+    parser.add_argument(
+        "--redis-db",
+        type=int,
+        default=0,
+        help="Redis db index (default: 0)",
     )
     parser.add_argument(
         "--cache-ttl",
@@ -763,7 +788,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Disable Redis cache even if redis url is configured",
+        help="Disable Redis cache even if redis host is configured",
     )
     return parser
 
@@ -790,7 +815,9 @@ async def _main_async(args: argparse.Namespace) -> None:
         write_failed_file=not args.no_failed_list,
         failed_list_file=failed_list_file,
         cache_enabled=not args.no_cache,
-        redis_url=args.redis_url,
+        redis_host=args.redis_host,
+        redis_port=args.redis_port,
+        redis_db=args.redis_db,
         redis_username=args.redis_username,
         redis_password=args.redis_password,
         cache_ttl_seconds=args.cache_ttl,

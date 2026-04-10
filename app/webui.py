@@ -4,12 +4,13 @@ import json
 import math
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import quote_plus, urlencode, urljoin
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 
 from aiohttp import web
 from bs4 import BeautifulSoup
@@ -17,16 +18,33 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from downloaders.jm import sync_jm_favorites
 from downloaders.toonily import Chapter, DownloadReport, ToonilyAsyncDownloader, normalize_url
-from provider_base import SiteProvider
-from provider_loader import load_provider_plugins
+from core.provider_base import SiteProvider
+from core.provider_loader import load_provider_plugins
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-BOOKSHELF_FILE = BASE_DIR / "bookshelf.json"
-SETTINGS_FILE = BASE_DIR / "webui_settings.json"
+DATA_DIR = Path(
+    os.getenv("DATA_DIR", "").strip()
+    or str(BASE_DIR / "data")
+).expanduser().resolve()
+BOOKSHELF_FILE = DATA_DIR / "bookshelf.json"
+SETTINGS_FILE = DATA_DIR / "webui_settings.json"
+LEGACY_BOOKSHELF_FILE = BASE_DIR / "bookshelf.json"
+LEGACY_SETTINGS_FILE = BASE_DIR / "webui_settings.json"
 TEMPLATES_DIR = BASE_DIR / "templates"
 DEFAULT_PROVIDER_ID = "toonily"
 _TEMPLATE_ENV: Optional[Environment] = None
+
+
+def ensure_data_dir_ready() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if DATA_DIR == BASE_DIR:
+        return
+
+    if not BOOKSHELF_FILE.exists() and LEGACY_BOOKSHELF_FILE.exists():
+        shutil.copy2(LEGACY_BOOKSHELF_FILE, BOOKSHELF_FILE)
+    if not SETTINGS_FILE.exists() and LEGACY_SETTINGS_FILE.exists():
+        shutil.copy2(LEGACY_SETTINGS_FILE, SETTINGS_FILE)
 
 
 def get_template_env() -> Environment:
@@ -206,9 +224,15 @@ class UIState:
         self.retries = 3
         self.timeout = 45
 
-        self.redis_url = os.getenv("TOONILY_REDIS_URL", "").strip()
-        self.redis_username = os.getenv("TOONILY_REDIS_USERNAME", "").strip()
-        self.redis_password = os.getenv("TOONILY_REDIS_PASSWORD", "").strip()
+        self.redis_host = os.getenv("REDIS_HOST", "").strip()
+        self.redis_port = parse_int(os.getenv("REDIS_PORT", "6379"), 6379, minimum=1, maximum=65535)
+        self.redis_db = parse_int(os.getenv("REDIS_DB", "0"), 0, minimum=0, maximum=999999)
+        self.redis_username = (
+            os.getenv("REDIS_USERNAME", "").strip()
+        )
+        self.redis_password = (
+            os.getenv("REDIS_PASSWORD", "").strip()
+        )
         self.cache_enabled = True
         self.cache_ttl_seconds = 900
         self.jm_username = os.getenv("JM_USERNAME", "").strip()
@@ -227,13 +251,25 @@ class UIState:
                 self.image_concurrency = max(1, int(raw.get("image_concurrency", self.image_concurrency)))
                 self.retries = max(1, int(raw.get("retries", self.retries)))
                 self.timeout = max(10, int(raw.get("timeout", self.timeout)))
-                self.redis_url = str(raw.get("redis_url", self.redis_url)).strip()
+                self.redis_host = str(raw.get("redis_host", self.redis_host)).strip()
+                self.redis_port = parse_int(raw.get("redis_port", self.redis_port), self.redis_port, minimum=1, maximum=65535)
+                self.redis_db = parse_int(raw.get("redis_db", self.redis_db), self.redis_db, minimum=0, maximum=999999)
                 self.redis_username = str(raw.get("redis_username", self.redis_username)).strip()
                 self.redis_password = str(raw.get("redis_password", self.redis_password)).strip()
                 self.cache_enabled = bool(raw.get("cache_enabled", self.cache_enabled))
                 self.cache_ttl_seconds = max(30, int(raw.get("cache_ttl_seconds", self.cache_ttl_seconds)))
                 self.jm_username = str(raw.get("jm_username", self.jm_username)).strip()
                 self.jm_password = str(raw.get("jm_password", self.jm_password)).strip()
+                if not self.redis_host:
+                    legacy_redis_url = str(raw.get("redis_url", "")).strip()
+                    if legacy_redis_url:
+                        parsed = urlparse(legacy_redis_url)
+                        self.redis_host = (parsed.hostname or "").strip()
+                        if parsed.port:
+                            self.redis_port = parse_int(parsed.port, self.redis_port, minimum=1, maximum=65535)
+                        db_text = parsed.path.lstrip("/").strip()
+                        if db_text:
+                            self.redis_db = parse_int(db_text, self.redis_db, minimum=0, maximum=999999)
                 enabled_providers = raw.get("enabled_providers")
                 if isinstance(enabled_providers, list):
                     self.enabled_provider_ids = {
@@ -241,6 +277,21 @@ class UIState:
                     }
             except Exception:
                 pass
+
+        if "REDIS_HOST" in os.environ:
+            self.redis_host = os.getenv("REDIS_HOST", "").strip()
+        if "REDIS_PORT" in os.environ:
+            self.redis_port = parse_int(os.getenv("REDIS_PORT", self.redis_port), self.redis_port, minimum=1, maximum=65535)
+        if "REDIS_DB" in os.environ:
+            self.redis_db = parse_int(os.getenv("REDIS_DB", self.redis_db), self.redis_db, minimum=0, maximum=999999)
+
+        if "REDIS_USERNAME" in os.environ:
+            self.redis_username = os.getenv("REDIS_USERNAME", "").strip()
+
+        if "REDIS_PASSWORD" in os.environ:
+            self.redis_password = os.getenv("REDIS_PASSWORD", "").strip()
+        if not self.redis_host:
+            self.cache_enabled = False
 
         self.normalize_enabled_providers()
 
@@ -261,7 +312,9 @@ class UIState:
             "image_concurrency": self.image_concurrency,
             "retries": self.retries,
             "timeout": self.timeout,
-            "redis_url": self.redis_url,
+            "redis_host": self.redis_host,
+            "redis_port": self.redis_port,
+            "redis_db": self.redis_db,
             "redis_username": self.redis_username,
             "redis_password": self.redis_password,
             "cache_enabled": self.cache_enabled,
@@ -442,6 +495,10 @@ def get_app_state(request: web.Request) -> UIState:
     return request.app["state"]
 
 
+def redis_cache_enabled_for_state(state: UIState) -> bool:
+    return bool(state.cache_enabled and state.redis_host.strip())
+
+
 async def fetch_html_with_downloader(
     state: UIState,
     url: str,
@@ -457,8 +514,10 @@ async def fetch_html_with_downloader(
         timeout=state.timeout,
         write_failed_file=False,
         logger=logger,
-        cache_enabled=state.cache_enabled,
-        redis_url=state.redis_url,
+        cache_enabled=redis_cache_enabled_for_state(state),
+        redis_host=state.redis_host,
+        redis_port=state.redis_port,
+        redis_db=state.redis_db,
         redis_username=state.redis_username,
         redis_password=state.redis_password,
         cache_ttl_seconds=state.cache_ttl_seconds,
@@ -638,8 +697,10 @@ async def fetch_series_snapshot_toonily(
         timeout=state.timeout,
         write_failed_file=False,
         logger=logger,
-        cache_enabled=state.cache_enabled,
-        redis_url=state.redis_url,
+        cache_enabled=redis_cache_enabled_for_state(state),
+        redis_host=state.redis_host,
+        redis_port=state.redis_port,
+        redis_db=state.redis_db,
         redis_username=state.redis_username,
         redis_password=state.redis_password,
         cache_ttl_seconds=state.cache_ttl_seconds,
@@ -1671,7 +1732,9 @@ def render_settings(state: UIState, msg: str) -> str:
             "image_concurrency": state.image_concurrency,
             "retries": state.retries,
             "timeout": state.timeout,
-            "redis_url": state.redis_url,
+            "redis_host": state.redis_host,
+            "redis_port": state.redis_port,
+            "redis_db": state.redis_db,
             "redis_username": state.redis_username,
             "redis_password": state.redis_password,
             "cache_ttl_seconds": state.cache_ttl_seconds,
@@ -2123,7 +2186,9 @@ async def handle_settings_post(request: web.Request) -> web.StreamResponse:
         state.image_concurrency = max(1, int(form.get("image_concurrency", state.image_concurrency)))
         state.retries = max(1, int(form.get("retries", state.retries)))
         state.timeout = max(10, int(form.get("timeout", state.timeout)))
-        state.redis_url = str(form.get("redis_url", "")).strip()
+        state.redis_host = str(form.get("redis_host", "")).strip()
+        state.redis_port = parse_int(form.get("redis_port", state.redis_port), state.redis_port, minimum=1, maximum=65535)
+        state.redis_db = parse_int(form.get("redis_db", state.redis_db), state.redis_db, minimum=0, maximum=999999)
         state.redis_username = str(form.get("redis_username", "")).strip()
         state.redis_password = str(form.get("redis_password", "")).strip()
         state.cache_ttl_seconds = max(30, int(form.get("cache_ttl_seconds", state.cache_ttl_seconds)))
@@ -2194,6 +2259,7 @@ async def on_shutdown(app: web.Application) -> None:
 
 def create_app() -> web.Application:
     ensure_providers_loaded()
+    ensure_data_dir_ready()
     state = UIState()
     state.load()
     state.output_dir.mkdir(parents=True, exist_ok=True)

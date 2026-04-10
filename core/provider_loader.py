@@ -5,7 +5,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-from provider_base import SiteProvider
+from core.provider_base import SiteProvider
 
 
 def _load_module(module_name: str, file_path: Path) -> ModuleType:
@@ -63,4 +63,3 @@ def load_provider_plugins(
         providers[provider_id] = provider
 
     return providers
-

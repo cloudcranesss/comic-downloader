@@ -16,7 +16,7 @@ RUN pip install --upgrade pip \
 
 COPY . .
 
-RUN mkdir -p /app/downloads
+RUN mkdir -p /app/downloads /app/data
 
 EXPOSE 8000
 

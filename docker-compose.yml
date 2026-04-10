@@ -1,29 +1,23 @@
 services:
   comic-downloader:
-    image: ghcr.io/cloudcranesss/comic-downloader:${APP_VERSION:-v1.0.1}
+    image: ghcr.io/cloudcranesss/comic-downloader:${APP_VERSION:-v1.0.2}
     container_name: comic-downloader
     ports:
       - "8000:8000"
     environment:
       TZ: Asia/Shanghai
-      TOONILY_REDIS_URL: redis://redis:6379/0
-      TOONILY_REDIS_USERNAME: ""
-      TOONILY_REDIS_PASSWORD: ""
+      DATA_DIR: /app/data
+      REDIS_HOST: ""
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      REDIS_USERNAME: ""
+      REDIS_PASSWORD: ""
       JM_USERNAME: ""
       JM_PASSWORD: ""
     volumes:
+      - app_data:/app/data
       - ./downloads:/app/downloads
-    depends_on:
-      - redis
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: comic-downloader-redis
-    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
-    volumes:
-      - redis_data:/data
     restart: unless-stopped
 
 volumes:
-  redis_data:
+  app_data:

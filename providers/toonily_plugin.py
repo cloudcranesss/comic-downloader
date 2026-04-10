@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from provider_base import SiteProvider
+from core.provider_base import SiteProvider
 from downloaders.toonily import Chapter, ToonilyAsyncDownloader
 
 
@@ -58,7 +58,9 @@ class ToonilyProvider(SiteProvider):
             pause_waiter=pause_waiter,
             cancel_checker=cancel_checker,
             cache_enabled=state.cache_enabled,
-            redis_url=state.redis_url,
+            redis_host=state.redis_host,
+            redis_port=state.redis_port,
+            redis_db=state.redis_db,
             redis_username=state.redis_username,
             redis_password=state.redis_password,
             cache_ttl_seconds=state.cache_ttl_seconds,

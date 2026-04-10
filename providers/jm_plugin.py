@@ -10,7 +10,7 @@ from downloaders.jm import (
     search_jm,
 )
 from downloaders.toonily import Chapter
-from provider_base import SiteProvider
+from core.provider_base import SiteProvider
 
 
 class JMProvider(SiteProvider):
