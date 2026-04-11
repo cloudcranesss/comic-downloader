@@ -163,6 +163,76 @@ def _format_latest_hint(info: dict[str, Any]) -> str:
         return ""
 
 
+_JM_LOGIN_CLIENTS: dict[str, Any] = {}
+_JM_LOGIN_CLIENTS_LOCK = threading.Lock()
+
+
+def _session_cache_key(*, username: str, proxy_url: str) -> str:
+    user = username.strip().lower()
+    proxy = normalize_proxy_url(proxy_url) if str(proxy_url or "").strip() else ""
+    return f"{user}|{proxy}"
+
+
+def _cached_client_get(key: str) -> Optional[Any]:
+    with _JM_LOGIN_CLIENTS_LOCK:
+        return _JM_LOGIN_CLIENTS.get(key)
+
+
+def _cached_client_set(key: str, client: Any) -> None:
+    with _JM_LOGIN_CLIENTS_LOCK:
+        _JM_LOGIN_CLIENTS[key] = client
+
+
+def _cached_client_pop(key: str) -> Optional[Any]:
+    with _JM_LOGIN_CLIENTS_LOCK:
+        return _JM_LOGIN_CLIENTS.pop(key, None)
+
+
+def _is_login_required_error(exc: Exception) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "请先登入会员",
+        "请先登录",
+        "未登录",
+        "login",
+        "not login",
+        "unauthorized",
+    )
+    return any(marker in text for marker in markers)
+
+
+async def _new_logged_in_client(
+    *,
+    output_dir: Path,
+    chapter_concurrency: int,
+    image_concurrency: int,
+    retries: int,
+    timeout: int,
+    jm_username: str,
+    jm_password: str,
+    proxy_url: str,
+    required: bool,
+) -> Any:
+    option = _build_jm_option(
+        output_dir=output_dir,
+        chapter_concurrency=chapter_concurrency,
+        image_concurrency=image_concurrency,
+        retries=retries,
+        timeout=timeout,
+        proxy_url=proxy_url,
+    )
+    client = await asyncio.to_thread(option.new_jm_client)
+    await _login_jm_client(
+        client,
+        username=jm_username,
+        password=jm_password,
+        required=required,
+    )
+    return client
+
+
 async def _login_jm_client(
     client: Any,
     *,
@@ -351,22 +421,22 @@ async def sync_jm_favorites(
     max_pages: int = 100,
     proxy_url: str = "",
 ) -> list[dict[str, str]]:
-    option = _build_jm_option(
-        output_dir=output_dir,
-        chapter_concurrency=chapter_concurrency,
-        image_concurrency=image_concurrency,
-        retries=retries,
-        timeout=timeout,
-        proxy_url=proxy_url,
-    )
-    client = await asyncio.to_thread(option.new_jm_client)
-    await _login_jm_client(
-        client,
-        username=jm_username,
-        password=jm_password,
-        required=True,
-    )
     username = jm_username.strip()
+    session_key = _session_cache_key(username=username, proxy_url=proxy_url)
+    client = _cached_client_get(session_key)
+    if client is None:
+        client = await _new_logged_in_client(
+            output_dir=output_dir,
+            chapter_concurrency=chapter_concurrency,
+            image_concurrency=image_concurrency,
+            retries=retries,
+            timeout=timeout,
+            jm_username=jm_username,
+            jm_password=jm_password,
+            proxy_url=proxy_url,
+            required=True,
+        )
+        _cached_client_set(session_key, client)
     base_url = _resolve_base_url(client)
 
     items: list[dict[str, str]] = []
@@ -377,12 +447,36 @@ async def sync_jm_favorites(
     max_pages = max(1, int(max_pages))
 
     while page_no <= total_pages and page_no <= max_pages:
-        page = await asyncio.to_thread(
-            _favorite_folder_call,
-            client,
-            page=page_no,
-            username=username,
-        )
+        try:
+            page = await asyncio.to_thread(
+                _favorite_folder_call,
+                client,
+                page=page_no,
+                username=username,
+            )
+        except Exception as exc:
+            # Session may expire between manual login and sync; recreate once.
+            if page_no == 1 and _is_login_required_error(exc):
+                client = await _new_logged_in_client(
+                    output_dir=output_dir,
+                    chapter_concurrency=chapter_concurrency,
+                    image_concurrency=image_concurrency,
+                    retries=retries,
+                    timeout=timeout,
+                    jm_username=jm_username,
+                    jm_password=jm_password,
+                    proxy_url=proxy_url,
+                    required=True,
+                )
+                _cached_client_set(session_key, client)
+                page = await asyncio.to_thread(
+                    _favorite_folder_call,
+                    client,
+                    page=page_no,
+                    username=username,
+                )
+            else:
+                raise
         total_pages = max(1, int(getattr(page, "page_count", 1)))
 
         rows = list(getattr(page, "content", []) or [])
@@ -425,19 +519,17 @@ async def manual_login_jm(
     jm_password: str,
     proxy_url: str = "",
 ) -> str:
-    option = _build_jm_option(
+    username = jm_username.strip()
+    session_key = _session_cache_key(username=username, proxy_url=proxy_url)
+    client = await _new_logged_in_client(
         output_dir=output_dir,
         chapter_concurrency=chapter_concurrency,
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        jm_username=jm_username,
+        jm_password=jm_password,
         proxy_url=proxy_url,
-    )
-    client = await asyncio.to_thread(option.new_jm_client)
-    await _login_jm_client(
-        client,
-        username=jm_username,
-        password=jm_password,
         required=True,
     )
     try:
@@ -445,11 +537,13 @@ async def manual_login_jm(
             _favorite_folder_call,
             client,
             page=1,
-            username=jm_username.strip(),
+            username=username,
         )
     except Exception as exc:
+        _cached_client_pop(session_key)
         raise RuntimeError(f"JM 登录校验失败：{exc}") from exc
-    return jm_username.strip()
+    _cached_client_set(session_key, client)
+    return username
 
 
 async def manual_logout_jm(
@@ -463,19 +557,27 @@ async def manual_logout_jm(
     jm_password: str,
     proxy_url: str = "",
 ) -> None:
-    option = _build_jm_option(
+    username = jm_username.strip()
+    session_key = _session_cache_key(username=username, proxy_url=proxy_url)
+    cached = _cached_client_pop(session_key)
+    if cached is not None:
+        logout = getattr(cached, "logout", None)
+        if callable(logout):
+            try:
+                await asyncio.to_thread(logout)
+            except Exception:
+                pass
+        return
+
+    client = await _new_logged_in_client(
         output_dir=output_dir,
         chapter_concurrency=chapter_concurrency,
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        jm_username=jm_username,
+        jm_password=jm_password,
         proxy_url=proxy_url,
-    )
-    client = await asyncio.to_thread(option.new_jm_client)
-    await _login_jm_client(
-        client,
-        username=jm_username,
-        password=jm_password,
         required=False,
     )
     logout = getattr(client, "logout", None)
