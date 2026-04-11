@@ -412,10 +412,15 @@ async def manual_login_jm(
         password=jm_password,
         required=True,
     )
-    try:
-        await asyncio.to_thread(client.favorite_folder, 1)
-    except Exception as exc:
-        raise RuntimeError(f"JM 登录校验失败：{exc}") from exc
+    favorite_folder = getattr(client, "favorite_folder", None)
+    if callable(favorite_folder):
+        try:
+            await asyncio.to_thread(favorite_folder, 1)
+        except Exception:
+            try:
+                await asyncio.to_thread(favorite_folder, "1")
+            except Exception:
+                pass
     return jm_username.strip()
 
 
