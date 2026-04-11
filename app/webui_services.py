@@ -2,6 +2,18 @@ from __future__ import annotations
 
 from app.webui_core import *
 
+def status_text(status: str) -> str:
+    mapping = {
+        "queued": "排队中",
+        "running": "进行中",
+        "paused": "已暂停",
+        "cancelling": "取消中",
+        "cancelled": "已取消",
+        "failed": "失败",
+        "completed": "完成",
+    }
+    return mapping.get(status, status)
+
 def chapter_percent(done_count: int, total_count: int) -> int:
     if total_count <= 0:
         return 0
