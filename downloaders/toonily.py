@@ -637,6 +637,26 @@ class ToonilyAsyncDownloader:
                     await asyncio.sleep(self.retry_base_delay_seconds * (2 ** (attempt - 1)))
                 else:
                     break
+        if self._requests_proxies:
+            try:
+                self.log(f"[WARN] proxy failed for {url}, retrying direct connection")
+                await self.wait_if_paused()
+                await self.ensure_not_cancelled()
+                response = await asyncio.to_thread(
+                    self.scraper.get,
+                    url,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                html = response.text
+                await self._cache_set_html(url, html)
+                return html
+            except asyncio.CancelledError:
+                raise
+            except Exception as direct_error:
+                raise RuntimeError(
+                    f"Failed to fetch {url}: {last_error}; direct retry failed: {direct_error}"
+                )
         raise RuntimeError(f"Failed to fetch {url}: {last_error}")
 
     async def get_series_details(self) -> tuple[str, list[Chapter]]:
