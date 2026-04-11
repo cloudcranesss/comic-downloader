@@ -279,6 +279,24 @@ def _favorite_folder_call(client: Any, *, page: int, username: str) -> Any:
         return favorite_folder(page)
 
 
+def _favorite_folder_gen_iter(client: Any, *, username: str, max_pages: int):
+    favorite_folder_gen = getattr(client, "favorite_folder_gen", None)
+    if not callable(favorite_folder_gen):
+        raise RuntimeError("当前 jmcomic 版本不支持收藏分页接口。")
+
+    kwargs: dict[str, Any] = {"page": 1, "folder_id": "0"}
+    user = (username or "").strip()
+    if user:
+        kwargs["username"] = user
+
+    count = 0
+    for page in favorite_folder_gen(**kwargs):
+        yield page
+        count += 1
+        if count >= max_pages:
+            break
+
+
 async def search_jm(
     keyword: str,
     *,
@@ -441,46 +459,39 @@ async def sync_jm_favorites(
 
     items: list[dict[str, str]] = []
     seen_album_ids: set[str] = set()
-
-    page_no = 1
-    total_pages = 1
     max_pages = max(1, int(max_pages))
 
-    while page_no <= total_pages and page_no <= max_pages:
-        try:
-            page = await asyncio.to_thread(
-                _favorite_folder_call,
-                client,
-                page=page_no,
+    def _load_pages(target_client: Any) -> list[Any]:
+        return list(
+            _favorite_folder_gen_iter(
+                target_client,
                 username=username,
+                max_pages=max_pages,
             )
-        except Exception as exc:
-            # Session may expire between manual login and sync; recreate once.
-            if page_no == 1 and _is_login_required_error(exc):
-                client = await _new_logged_in_client(
-                    output_dir=output_dir,
-                    chapter_concurrency=chapter_concurrency,
-                    image_concurrency=image_concurrency,
-                    retries=retries,
-                    timeout=timeout,
-                    jm_username=jm_username,
-                    jm_password=jm_password,
-                    proxy_url=proxy_url,
-                    required=True,
-                )
-                _cached_client_set(session_key, client)
-                page = await asyncio.to_thread(
-                    _favorite_folder_call,
-                    client,
-                    page=page_no,
-                    username=username,
-                )
-            else:
-                raise
-        total_pages = max(1, int(getattr(page, "page_count", 1)))
+        )
 
+    try:
+        pages = await asyncio.to_thread(_load_pages, client)
+    except Exception as exc:
+        if not _is_login_required_error(exc):
+            raise
+        client = await _new_logged_in_client(
+            output_dir=output_dir,
+            chapter_concurrency=chapter_concurrency,
+            image_concurrency=image_concurrency,
+            retries=retries,
+            timeout=timeout,
+            jm_username=jm_username,
+            jm_password=jm_password,
+            proxy_url=proxy_url,
+            required=True,
+        )
+        _cached_client_set(session_key, client)
+        pages = await asyncio.to_thread(_load_pages, client)
+
+    for page_index, page in enumerate(pages, start=1):
         rows = list(getattr(page, "content", []) or [])
-        if not rows and page_no == 1:
+        if not rows and page_index == 1:
             break
 
         for album_id, info in rows:
@@ -503,7 +514,6 @@ async def sync_jm_favorites(
 
         if not rows:
             break
-        page_no += 1
 
     return items
 
