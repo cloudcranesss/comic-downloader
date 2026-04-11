@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from aiohttp import web
+
 from app.webui_base import *
 from app.webui_rendering import *
 

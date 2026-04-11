@@ -1,33 +1,20 @@
+from __future__ import annotations
 
-import asyncio
-import csv
-import json
-import math
 import os
-import re
 import shutil
-import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from html import escape
-from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Optional
-from urllib.parse import quote, quote_plus, unquote, urlencode, urljoin, urlparse
+from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlparse
 
-from aiohttp import ClientSession, ClientTimeout, web
-from bs4 import BeautifulSoup
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from downloaders.jm import manual_login_jm, manual_logout_jm, sync_jm_favorites
-from downloaders.toonily import (
-    Chapter,
-    DownloadReport,
-    ToonilyAsyncDownloader,
-    normalize_proxy_url,
-    normalize_url,
-)
 from core.provider_base import SiteProvider
 from core.provider_loader import load_provider_plugins
+
+if TYPE_CHECKING:
+    from app.webui_state import UIState
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -214,7 +201,7 @@ def provider_name(provider_id: str) -> str:
     return key or DEFAULT_PROVIDER_ID
 
 
-def provider_disabled_reason(state: "UIState", provider: SiteProvider) -> str:
+def provider_disabled_reason(state: UIState, provider: SiteProvider) -> str:
     if not provider.enabled:
         return provider.disabled_reason or "该站点当前不可用。"
     if not state.is_provider_enabled(provider.provider_id):
@@ -222,7 +209,7 @@ def provider_disabled_reason(state: "UIState", provider: SiteProvider) -> str:
     return ""
 
 
-def provider_enabled_for_state(state: "UIState", provider: SiteProvider) -> bool:
+def provider_enabled_for_state(state: UIState, provider: SiteProvider) -> bool:
     return provider_disabled_reason(state, provider) == ""
 
 

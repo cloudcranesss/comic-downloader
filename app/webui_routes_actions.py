@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from typing import Any
+
+from aiohttp import web
+
+from downloaders.jm import manual_login_jm, manual_logout_jm, sync_jm_favorites
+
 from app.webui_base import *
 from app.webui_rendering import *
 
@@ -183,7 +191,7 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
         raise build_redirect("/dashboard", msg=word, sp=sp, sps=sps)
 
     if action == "download_all":
-        job = state.create_job(
+        state.create_job(
             title=f"下载全部：{title or series_url}",
             series_url=series_url,
             chapter_selector="all",
@@ -202,7 +210,7 @@ async def handle_search_action(request: web.Request) -> web.StreamResponse:
             cover=cover,
         )
         await state.save_bookshelf()
-        job = state.create_job(
+        state.create_job(
             title=f"追更下载：{book['title']}",
             series_url=book["series_url"],
             chapter_selector="all",
@@ -694,7 +702,7 @@ async def handle_bookshelf_bulk(request: web.Request) -> web.StreamResponse:
         queued = 0
         for book in selected_books:
             title = f"下载全部：{book.get('title') or '未命名漫画'}"
-            job = state.create_job(
+            state.create_job(
                 title=title,
                 series_url=str(book.get("series_url") or ""),
                 chapter_selector="all",
