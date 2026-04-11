@@ -31,7 +31,7 @@
 
 ### 1) 本地 Python
 
-要求：Python 3.10+
+要求：Python 3.12.10
 
 ```bash
 pip install -r requirements.txt
