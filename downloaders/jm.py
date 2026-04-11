@@ -187,6 +187,28 @@ async def _login_jm_client(
         return False
 
 
+def _favorite_folder_call(client: Any, *, page: int, username: str) -> Any:
+    favorite_folder = getattr(client, "favorite_folder", None)
+    if not callable(favorite_folder):
+        raise RuntimeError("当前 jmcomic 版本不支持收藏接口。")
+
+    user = (username or "").strip()
+    if user:
+        try:
+            return favorite_folder(page=page, username=user)
+        except TypeError:
+            pass
+        try:
+            return favorite_folder(page, "mr", "0", user)
+        except TypeError:
+            pass
+
+    try:
+        return favorite_folder(page=page)
+    except TypeError:
+        return favorite_folder(page)
+
+
 async def search_jm(
     keyword: str,
     *,
@@ -344,6 +366,7 @@ async def sync_jm_favorites(
         password=jm_password,
         required=True,
     )
+    username = jm_username.strip()
     base_url = _resolve_base_url(client)
 
     items: list[dict[str, str]] = []
@@ -354,7 +377,12 @@ async def sync_jm_favorites(
     max_pages = max(1, int(max_pages))
 
     while page_no <= total_pages and page_no <= max_pages:
-        page = await asyncio.to_thread(client.favorite_folder, page_no)
+        page = await asyncio.to_thread(
+            _favorite_folder_call,
+            client,
+            page=page_no,
+            username=username,
+        )
         total_pages = max(1, int(getattr(page, "page_count", 1)))
 
         rows = list(getattr(page, "content", []) or [])
@@ -412,15 +440,15 @@ async def manual_login_jm(
         password=jm_password,
         required=True,
     )
-    favorite_folder = getattr(client, "favorite_folder", None)
-    if callable(favorite_folder):
-        try:
-            await asyncio.to_thread(favorite_folder, 1)
-        except Exception:
-            try:
-                await asyncio.to_thread(favorite_folder, "1")
-            except Exception:
-                pass
+    try:
+        await asyncio.to_thread(
+            _favorite_folder_call,
+            client,
+            page=1,
+            username=jm_username.strip(),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"JM 登录校验失败：{exc}") from exc
     return jm_username.strip()
 
 
