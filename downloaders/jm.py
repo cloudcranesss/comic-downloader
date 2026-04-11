@@ -12,6 +12,7 @@ from downloaders.toonily import (
     ChapterResult,
     DownloadReport,
     normalize_url,
+    normalize_proxy_url,
     parse_selector,
     sanitize_name,
 )
@@ -104,6 +105,7 @@ def _build_jm_option(
     image_concurrency: int,
     retries: int,
     timeout: int,
+    proxy_url: str = "",
 ) -> Any:
     jm = _require_jm()
     option_dict = jm.JmOption.default_dict()
@@ -118,6 +120,8 @@ def _build_jm_option(
 
     meta_data = option_dict["client"]["postman"]["meta_data"]
     meta_data["timeout"] = max(10, int(timeout))
+    proxy = normalize_proxy_url(proxy_url) if str(proxy_url or "").strip() else ""
+    meta_data["proxies"] = {"http": proxy, "https": proxy} if proxy else {}
 
     return jm.JmOption.construct(option_dict, cover_default=False)
 
@@ -194,6 +198,7 @@ async def search_jm(
     max_results: int = 40,
     jm_username: str = "",
     jm_password: str = "",
+    proxy_url: str = "",
 ) -> list[dict[str, Any]]:
     query = keyword.strip()
     if not query:
@@ -205,6 +210,7 @@ async def search_jm(
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        proxy_url=proxy_url,
     )
     client = await asyncio.to_thread(option.new_jm_client)
     base_url = _resolve_base_url(client)
@@ -280,6 +286,7 @@ async def fetch_series_snapshot_jm(
     timeout: int,
     jm_username: str = "",
     jm_password: str = "",
+    proxy_url: str = "",
 ) -> tuple[str, list[Chapter]]:
     option = _build_jm_option(
         output_dir=output_dir,
@@ -287,6 +294,7 @@ async def fetch_series_snapshot_jm(
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        proxy_url=proxy_url,
     )
     client = await asyncio.to_thread(option.new_jm_client)
     await _login_jm_client(
@@ -319,6 +327,7 @@ async def sync_jm_favorites(
     jm_username: str,
     jm_password: str,
     max_pages: int = 100,
+    proxy_url: str = "",
 ) -> list[dict[str, str]]:
     option = _build_jm_option(
         output_dir=output_dir,
@@ -326,6 +335,7 @@ async def sync_jm_favorites(
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        proxy_url=proxy_url,
     )
     client = await asyncio.to_thread(option.new_jm_client)
     await _login_jm_client(
@@ -385,6 +395,7 @@ async def manual_login_jm(
     timeout: int,
     jm_username: str,
     jm_password: str,
+    proxy_url: str = "",
 ) -> str:
     option = _build_jm_option(
         output_dir=output_dir,
@@ -392,6 +403,7 @@ async def manual_login_jm(
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        proxy_url=proxy_url,
     )
     client = await asyncio.to_thread(option.new_jm_client)
     await _login_jm_client(
@@ -416,6 +428,7 @@ async def manual_logout_jm(
     timeout: int,
     jm_username: str,
     jm_password: str,
+    proxy_url: str = "",
 ) -> None:
     option = _build_jm_option(
         output_dir=output_dir,
@@ -423,6 +436,7 @@ async def manual_logout_jm(
         image_concurrency=image_concurrency,
         retries=retries,
         timeout=timeout,
+        proxy_url=proxy_url,
     )
     client = await asyncio.to_thread(option.new_jm_client)
     await _login_jm_client(
@@ -688,6 +702,7 @@ class JMAsyncDownloader:
         cancel_checker: Optional[Callable[[], bool]] = None,
         jm_username: str = "",
         jm_password: str = "",
+        proxy_url: str = "",
     ) -> None:
         self.series_url = series_url.strip()
         self.output_dir = output_dir
@@ -705,6 +720,7 @@ class JMAsyncDownloader:
         self.cancel_checker = cancel_checker
         self.jm_username = jm_username.strip()
         self.jm_password = str(jm_password or "")
+        self.proxy_url = normalize_proxy_url(proxy_url) if str(proxy_url or "").strip() else ""
 
     def log(self, message: str) -> None:
         if self.logger is not None:
@@ -799,6 +815,7 @@ class JMAsyncDownloader:
             image_concurrency=self.image_concurrency,
             retries=self.retries,
             timeout=self.timeout,
+            proxy_url=self.proxy_url,
         )
         client = await asyncio.to_thread(option.new_jm_client)
         await _login_jm_client(

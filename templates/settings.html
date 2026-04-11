@@ -173,6 +173,35 @@
     </div>
 
     <div class="settings-section">
+      <h3 class="settings-title">Site Proxy</h3>
+      <div class="settings-grid">
+        <div style="grid-column:1 / -1;">
+          <label>Global Proxy URL (http/https)</label>
+          <input class="input" name="default_proxy_url" value="{{ settings.default_proxy_url }}" placeholder="http://127.0.0.1:7890" />
+          <div class="subtle" style="margin-top:6px;">
+            Enable proxy per site below. Leave site URL empty to use global proxy URL.
+          </div>
+        </div>
+        {% for site in settings.provider_switches %}
+        <div style="border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:10px;background:rgba(255,255,255,0.03);">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <strong>{{ site.name }}</strong>
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <input type="checkbox" name="proxy_enabled_{{ site.id }}" value="1"{% if site.proxy_enabled %} checked{% endif %} />
+              <span class="subtle">Enable Proxy</span>
+            </label>
+          </div>
+          <div style="margin-top:8px;">
+            <input class="input" name="proxy_url_{{ site.id }}" value="{{ site.proxy_url }}" placeholder="Use global when empty" />
+          </div>
+          {% if site.effective_proxy_label %}
+          <div class="subtle" style="margin-top:6px;">Effective: {{ site.effective_proxy_label }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="settings-section">
       <h3 class="settings-title">JM 账号</h3>
       <div class="settings-grid">
         <div><label>JM 用户名</label><input class="input" name="jm_username" value="{{ settings.jm_username }}" autocomplete="username" /></div>

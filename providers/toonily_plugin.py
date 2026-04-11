@@ -79,6 +79,7 @@ class ToonilyProvider(SiteProvider):
             bandwidth_night_kbps=state.bandwidth_night_kbps,
             night_start_hour=state.night_start_hour,
             night_end_hour=state.night_end_hour,
+            proxy_url=state.get_provider_proxy_url(self.provider_id),
         )
 
 

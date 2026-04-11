@@ -176,6 +176,16 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def normalize_proxy_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Invalid proxy URL. Use http://host:port or https://host:port")
+    return text
+
+
 def safe_format(template: str, mapping: dict[str, Any], fallback: str) -> str:
     try:
         return str(template).format_map(mapping)
@@ -234,6 +244,7 @@ class ToonilyAsyncDownloader:
         bandwidth_night_kbps: int = 0,
         night_start_hour: int = 22,
         night_end_hour: int = 7,
+        proxy_url: str = "",
     ) -> None:
         self.series_url = series_url.strip()
         self.output_dir = output_dir
@@ -286,6 +297,12 @@ class ToonilyAsyncDownloader:
         self.bandwidth_night_kbps = max(0, int(bandwidth_night_kbps))
         self.night_start_hour = max(0, min(23, int(night_start_hour)))
         self.night_end_hour = max(0, min(23, int(night_end_hour)))
+        self.proxy_url = normalize_proxy_url(proxy_url) if str(proxy_url or "").strip() else ""
+        self._requests_proxies = (
+            {"http": self.proxy_url, "https": self.proxy_url}
+            if self.proxy_url
+            else None
+        )
 
         self._redis: Optional[Redis] = None  # type: ignore[valid-type]
         self._cache_disabled_reason = ""
@@ -602,6 +619,7 @@ class ToonilyAsyncDownloader:
                     self.scraper.get,
                     url,
                     timeout=self.timeout,
+                    proxies=self._requests_proxies,
                 )
                 response.raise_for_status()
                 html = response.text
@@ -721,6 +739,7 @@ class ToonilyAsyncDownloader:
                         image_url,
                         headers={"Referer": referer, "User-Agent": UA},
                         timeout=aiohttp.ClientTimeout(total=self.timeout),
+                        proxy=self.proxy_url or None,
                     ) as response:
                         if response.status >= 400:
                             raise RuntimeError(f"HTTP {response.status}")

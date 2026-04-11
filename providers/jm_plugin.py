@@ -31,6 +31,7 @@ class JMProvider(SiteProvider):
             timeout=state.timeout,
             jm_username=state.jm_username,
             jm_password=state.jm_password,
+            proxy_url=state.get_provider_proxy_url(self.provider_id),
         )
 
     async def fetch_series_snapshot(
@@ -48,6 +49,7 @@ class JMProvider(SiteProvider):
             timeout=state.timeout,
             jm_username=state.jm_username,
             jm_password=state.jm_password,
+            proxy_url=state.get_provider_proxy_url(self.provider_id),
         )
 
     def create_downloader(
@@ -78,6 +80,7 @@ class JMProvider(SiteProvider):
             cancel_checker=cancel_checker,
             jm_username=state.jm_username,
             jm_password=state.jm_password,
+            proxy_url=state.get_provider_proxy_url(self.provider_id),
         )
 
 
