@@ -138,7 +138,11 @@ def mask_proxy_url(value: str) -> str:
 
 def form_getall_str(form: Any, key: str) -> list[str]:
     if hasattr(form, "getall"):
-        return [str(v).strip() for v in form.getall(key) if str(v).strip()]
+        try:
+            values = form.getall(key)
+        except KeyError:
+            return []
+        return [str(v).strip() for v in values if str(v).strip()]
     value = str(form.get(key, "") or "").strip() if hasattr(form, "get") else ""
     return [value] if value else []
 
