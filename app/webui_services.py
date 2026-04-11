@@ -102,6 +102,9 @@ def count_active_jobs(state: UIState) -> int:
 
 
 def dispatch_jobs(state: UIState) -> None:
+    # Delayed import avoids cyclic dependency after webui module split.
+    from app.webui_routes_jobs import start_job
+
     active = count_active_jobs(state)
     if active >= state.max_parallel_jobs:
         return
