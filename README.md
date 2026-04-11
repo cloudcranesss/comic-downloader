@@ -35,10 +35,10 @@
 
 ```bash
 pip install -r requirements.txt
-python main.py --port 8000
+python main.py --port 9999
 ```
 
-访问：`http://127.0.0.1:8000`
+访问：`http://127.0.0.1:9999`
 
 ### 2) Docker Compose
 
@@ -48,10 +48,12 @@ python main.py --port 8000
 docker compose up -d
 ```
 
+`docker-compose.yml` 已使用 `network_mode: host`，服务端口固定为 `9999`。
+
 ## 常用参数
 
 ```bash
-python main.py --host 127.0.0.1 --port 8000 --skip-auto-install
+python main.py --host 127.0.0.1 --port 9999 --skip-auto-install
 ```
 
 - `--skip-auto-install`：跳过启动前依赖自动安装

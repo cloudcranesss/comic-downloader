@@ -2,8 +2,7 @@ services:
   comic-downloader:
     image: ghcr.io/cloudcranesss/comic-downloader:${APP_VERSION:-latest}
     container_name: comic-downloader
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /app/data

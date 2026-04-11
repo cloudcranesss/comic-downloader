@@ -18,6 +18,6 @@ COPY . .
 
 RUN mkdir -p /app/downloads /app/data
 
-EXPOSE 8000
+EXPOSE 9999
 
-CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py", "--host", "0.0.0.0", "--port", "9999"]

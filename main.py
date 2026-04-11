@@ -43,7 +43,7 @@ def safe_print(message: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="漫画下载 WebUI")
     parser.add_argument("--host", default="127.0.0.1", help="WebUI host")
-    parser.add_argument("--port", type=int, default=8000, help="WebUI port")
+    parser.add_argument("--port", type=int, default=9999, help="WebUI port")
     parser.add_argument(
         "--skip-auto-install",
         action="store_true",
